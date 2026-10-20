@@ -33,7 +33,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from capture_window import find_windows, _title, _class
+from capture_window import find_windows, _title, _class, owner_exe
 
 REPO = Path(__file__).resolve().parent.parent
 EXCHANGE = Path("C:/Users/Public/altium_mcp")
@@ -64,6 +64,8 @@ def close_dialogs():
     """Close modal error dialogs. They block input and can mask the wedge."""
     def is_dialog(h):
         cls = _class(h)
+        if owner_exe(h).lower() != "x2.exe":         # never another application's dialog
+            return False
         return cls == "#32770" or (
             cls == "TMessageForm" and _title(h) in
             ("Error", "Warning", "Information", "Confirm"))
@@ -172,4 +174,13 @@ def unwedge(verbose=True, verify=True):
 
 
 if __name__ == "__main__":
-    sys.exit(0 if unwedge(verify="--no-verify" not in sys.argv) else 1)
+    sys.path.insert(0, str(REPO / "server"))
+    import script_lock
+    if (holder := script_lock.take("altium-mcp dev/unwedge.py", wait=10)) is not None:
+        print(script_lock.describe(holder))
+        sys.exit(1)
+    try:
+        ok = unwedge(verify="--no-verify" not in sys.argv)
+    finally:
+        script_lock.release()
+    sys.exit(0 if ok else 1)

@@ -55,6 +55,9 @@ config = json.load(open(_config_path()))
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from unwedge import unwedge  # noqa: E402
+from capture_window import owner_exe  # noqa: E402
+sys.path.insert(0, str(REPO / "server"))
+import script_lock  # noqa: E402  one script at a time across every tool driving Altium
 
 
 def _title(hwnd):
@@ -143,6 +146,8 @@ def find_dialogs():
             return True
         cls = ctypes.create_unicode_buffer(64)
         user32.GetClassNameW(hwnd, cls, 64)
+        if owner_exe(hwnd).lower() != "x2.exe":      # never another application's dialog
+            return True
         if cls.value == "#32770":
             found.append((hwnd, cls.value, _title(hwnd)))
         elif cls.value == "TMessageForm":
@@ -289,15 +294,7 @@ def restart_altium(wait=180):
         SANDBOX_PAS.write_text(saved, encoding="utf-8")
 
 
-if __name__ == "__main__":
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    flags = {a for a in sys.argv[1:] if a.startswith("--")}
-    if not args:
-        print(__doc__)
-        sys.exit(1)
-    body = sys.stdin.read() if args[0] == "-" else Path(args[0]).read_text(encoding="utf-8")
-    timeout = int(args[1]) if len(args) > 1 else 120
-
+def sandbox(body, timeout, flags):
     inject(body)
     print(f"injected {len(body.strip().splitlines())} lines -> running sandbox...")
     ok = run(timeout=timeout)
@@ -314,5 +311,23 @@ if __name__ == "__main__":
     elif not ok:
         print("\n>> Executor is now WEDGED. Re-run with --auto-restart, or")
         print(">> restart Altium manually before the next experiment.")
+    return ok
 
+
+if __name__ == "__main__":
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    flags = {a for a in sys.argv[1:] if a.startswith("--")}
+    if not args:
+        print(__doc__)
+        sys.exit(1)
+    body = sys.stdin.read() if args[0] == "-" else Path(args[0]).read_text(encoding="utf-8")
+    timeout = int(args[1]) if len(args) > 1 else 120
+
+    if (holder := script_lock.take("altium-mcp dev/sandbox_runner.py", wait=10)) is not None:
+        print(script_lock.describe(holder))
+        sys.exit(1)
+    try:
+        ok = sandbox(body, timeout, flags)
+    finally:
+        script_lock.release()
     sys.exit(0 if ok else 1)

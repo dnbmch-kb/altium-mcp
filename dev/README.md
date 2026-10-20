@@ -12,6 +12,15 @@
 
 Tools for developing new Altium API functionality. Not part of the MCP server.
 
+## One script at a time
+
+Altium runs one script at a time, and several tools drive the same running instance: this server, these dev
+tools, and outside this repo altium-lib-factory's `tools/altium_run.py` (board templates, the library batch) and
+laser-calib's `run_in_altium.py`. Each holds the lock in [`../server/script_lock.py`](../server/script_lock.py)
+(the same protocol as `c:/Projects/tools/altium/altium_lock.py`) from its RunScript until the script's output
+arrives; a busy Altium is reported with the holder's name, pid and start. The dialog closers here touch only
+windows owned by `X2.EXE` (`capture_window.owner_exe`), never another application's.
+
 ## Why
 
 Altium has no headless test mode for DelphiScript, and its failure modes are

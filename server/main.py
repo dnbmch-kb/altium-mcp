@@ -24,6 +24,7 @@ import re
 
 from altium_files import read_altium_text, write_altium_text
 from outjob_parser import parse_outjob
+import script_lock
 
 # Configure logging
 logging.basicConfig(
@@ -271,7 +272,13 @@ class AltiumBridge:
     async def execute_command(self, command: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a command in Altium via the bridge script"""
         async with self._command_lock:
-            return await self._execute_command_locked(command, params)
+            holder = await take_script_lock(f"altium-mcp {command}")
+            if holder is not None:
+                return {"success": False, "error": script_lock.describe(holder)}
+            try:
+                return await self._execute_command_locked(command, params)
+            finally:
+                script_lock.release()
 
     async def _execute_command_locked(self, command: str, params: Dict[str, Any]) -> Dict[str, Any]:
         try:
@@ -417,6 +424,16 @@ class AltiumBridge:
         except Exception as e:
             logger.error(f"Error launching Altium: {e}")
             return False
+
+async def take_script_lock(owner: str, wait: float = 60):
+    """Wait up to `wait` seconds for Altium's one-script lock (script_lock.py): None when taken, else the holder."""
+    deadline = time.monotonic() + wait
+    while (holder := script_lock.try_take(owner)) is not None:
+        if time.monotonic() >= deadline:
+            return holder
+        await asyncio.sleep(0.5)
+    return None
+
 
 # Create a global bridge instance
 altium_bridge = AltiumBridge()
@@ -1166,8 +1183,7 @@ def _dismiss_altium_dialogs():
     return found
 
 
-@mcp.tool()
-async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 120) -> str:
+async def _run_altium_script(ctx: Context, script: str, timeout_seconds: int = 120) -> str:
     """
     Run a DelphiScript snippet inside an isolated Altium sandbox and report
     what happened, step by step.
@@ -1297,6 +1313,20 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
                     "running this shell command: \"<altium_exe>\" -REditScript:Stop  "
                     "-- then retry. If it still fails, the script itself has a COMPILE error.",
         "dialogs_dismissed": len(dialogs), "dismissed_dialog_titles": titles}, indent=2)
+
+
+async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 120) -> str:
+    holder = await take_script_lock("altium-mcp run_altium_script")
+    if holder is not None:
+        return json.dumps({"success": False, "error": script_lock.describe(holder)})
+    try:
+        return await _run_altium_script(ctx, script, timeout_seconds)
+    finally:
+        script_lock.release()
+
+
+run_altium_script.__doc__ = _run_altium_script.__doc__  # the tool's description
+mcp.tool()(run_altium_script)
 
 
 @mcp.tool()

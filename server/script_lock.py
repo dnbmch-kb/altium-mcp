@@ -1,0 +1,71 @@
+"""One script at a time in the running Altium, across every tool that drives it.
+
+Altium runs one script at a time; a RunScript sent while another runs is lost or interleaves with it. This server,
+its dev sandbox and the scripts outside this repo (altium-lib-factory's tools/altium_run.py, laser-calib's
+run_in_altium.py, through c:/Projects/tools/altium/altium_lock.py, the same protocol) each hold this lock from a
+RunScript until its output arrives: the file C:/Users/Public/altium_mcp/altium_script.lock, created exclusively,
+holding the holder's pid, what it runs and since when. A holder whose process has exited left a stale file, which
+the next taker removes. Kept here as well so the server stays self-contained.
+"""
+import ctypes
+import json
+import os
+import time
+from pathlib import Path
+
+LOCK = Path("C:/Users/Public/altium_mcp/altium_script.lock")
+UNWRITTEN_GRACE = 10       # seconds an unreadable lock file may be in the middle of being written
+
+
+def describe(holder):
+    return (f"Altium is running another script: {holder.get('owner', '?')} (pid {holder.get('pid', '?')}, "
+            f"since {time.ctime(holder.get('since', 0))})")
+
+
+def alive(pid):
+    k = ctypes.windll.kernel32
+    handle = k.OpenProcess(0x1000, False, pid)      # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return False
+    code = ctypes.c_ulong()
+    k.GetExitCodeProcess(handle, ctypes.byref(code))
+    k.CloseHandle(handle)
+    return code.value == 259                         # STILL_ACTIVE
+
+
+def try_take(owner):
+    """Take the lock: None when taken, else the live holder's record."""
+    LOCK.parent.mkdir(parents=True, exist_ok=True)
+    while True:
+        try:
+            with open(LOCK, "x", encoding="utf-8") as f:
+                json.dump(dict(pid=os.getpid(), owner=owner, since=time.time()), f)
+            return None
+        except FileExistsError:
+            try:
+                holder = json.loads(LOCK.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                if time.time() - LOCK.stat().st_mtime < UNWRITTEN_GRACE:
+                    return {"owner": "a runner writing the lock"}
+                holder = {"pid": 0}
+            if alive(holder.get("pid", 0)):
+                return holder
+            LOCK.unlink(missing_ok=True)             # stale: its process is gone
+
+
+def release():
+    try:
+        if json.loads(LOCK.read_text(encoding="utf-8")).get("pid") == os.getpid():
+            LOCK.unlink()
+    except (OSError, ValueError):
+        pass
+
+
+def take(owner, wait):
+    """Blocking take for scripts: None when taken, else the holder that kept it past `wait` seconds."""
+    deadline = time.monotonic() + wait
+    while (holder := try_take(owner)) is not None:
+        if time.monotonic() >= deadline:
+            return holder
+        time.sleep(0.5)
+    return None

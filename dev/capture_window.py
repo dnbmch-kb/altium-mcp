@@ -33,6 +33,22 @@ def _class(hwnd):
     return buf.value
 
 
+def owner_exe(hwnd):
+    """File name of the executable that owns a window ('' if unknown): dialogs are closed only when it is X2.EXE."""
+    pid = wintypes.DWORD()
+    ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid.value)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return ""
+    try:
+        buf = ctypes.create_unicode_buffer(1024)
+        size = wintypes.DWORD(len(buf))
+        ok = ctypes.windll.kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size))
+        return Path(buf.value).name if ok else ""
+    finally:
+        ctypes.windll.kernel32.CloseHandle(handle)
+
+
 
 def focus_and_refresh(hwnd, settle=1.2):
     """Bring a window truly to the front and force it to repaint.
