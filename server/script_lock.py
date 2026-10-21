@@ -1,8 +1,8 @@
 """One script at a time in the running Altium, across every tool that drives it.
 
 Altium runs one script at a time; a RunScript sent while another runs is lost or interleaves with it. This server,
-its dev sandbox and the scripts outside this repo (altium-lib-factory's tools/altium_run.py, laser-calib's
-run_in_altium.py, through c:/Projects/tools/altium/altium_lock.py, the same protocol) each hold this lock from a
+its dev sandbox and the runner outside this repo (c:/Projects/tools/altium/altium_run.py, through
+c:/Projects/tools/altium/altium_lock.py, the same protocol) each hold this lock from a
 RunScript until its output arrives: the file C:/Users/Public/altium_mcp/altium_script.lock, created exclusively,
 holding the holder's pid, what it runs and since when. A holder whose process has exited left a stale file, which
 the next taker removes. Kept here as well so the server stays self-contained.
