@@ -1,6 +1,11 @@
 from mcp.server.fastmcp import FastMCP, Context
 from mcp.server.fastmcp.utilities.types import Image as MCPImage
+import codecs
+import configparser
+import hashlib
 import json
+import shutil
+import tempfile
 import os
 import time
 import asyncio
@@ -62,6 +67,46 @@ EXCHANGE_DIR = Path("C:/Users/Public/altium_mcp")
 EXCHANGE_DIR.mkdir(exist_ok=True)
 REQUEST_FILE = EXCHANGE_DIR / "request.json"
 RESPONSE_FILE = EXCHANGE_DIR / "response.json"
+BRIDGE_STAGE_DIR = EXCHANGE_DIR / "bridge"
+
+
+def stage_bridge(project: Path, root: Path = BRIDGE_STAGE_DIR) -> Path:
+    """The bridge's script project, copied into a folder named by its content.
+
+    Altium runs the in-memory text of a script project it already has open, not
+    the file on disk, so a bridge run in place keeps running the text it first
+    loaded after a unit is edited. The folder name is the hash of the project
+    file and every unit it lists: unchanged sources reuse the copy Altium has
+    open, an edit gets a new one. It sits in the exchange directory, which
+    Altium sees under the same path even when Claude Desktop's MSIX package
+    redirects this process's AppData writes."""
+    project = Path(project)
+    text = project.read_bytes().removeprefix(codecs.BOM_UTF8).decode("latin-1")
+    cfg = configparser.ConfigParser(interpolation=None)
+    cfg.read_string(text)
+    units = []
+    for section in cfg.sections():
+        if section.startswith("Document"):
+            relative = Path(cfg[section]["DocumentPath"].replace("\\", "/"))
+            source = (project.parent / relative).resolve()
+            if relative.is_absolute() or not source.is_relative_to(project.parent.resolve()):
+                raise ValueError(f"script unit escapes its project directory: {relative}")
+            if not source.is_file():
+                raise FileNotFoundError(source)
+            units.append(relative)
+    digest = hashlib.sha256()
+    for relative in [Path(project.name)] + units:
+        digest.update(relative.as_posix().encode() + b"\0" + (project.parent / relative).read_bytes())
+    target = root / digest.hexdigest()[:16]
+    if not (target / project.name).is_file():
+        root.mkdir(parents=True, exist_ok=True)
+        (root / ".parked").touch()
+        staging = Path(tempfile.mkdtemp(prefix="staging_", dir=root))
+        for relative in [Path(project.name)] + units:
+            (staging / relative).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(project.parent / relative, staging / relative)
+        staging.rename(target)
+    return target / project.name
 
 # Initialize FastMCP server
 mcp = FastMCP("AltiumMCP", description="Altium integration through the Model Context Protocol")
@@ -405,9 +450,9 @@ class AltiumBridge:
             return False
 
         try:
-            # Resolve MSIX-virtualized path so Altium (an external process
-            # outside the MSIX sandbox) can find the script files
-            script_path = self._resolve_msix_path(self.config.script_path)
+            # A copy named by its content, so Altium never runs an old unit text
+            # it still holds in memory, in a folder it sees under the same path
+            script_path = str(stage_bridge(Path(self.config.script_path)))
 
             # Command format: "X2.EXE" -RScriptingSystem:RunScript(ProjectName="path\file.PrjScr"|ProcName="ModuleName>Run")
             command = f'"{self.config.altium_exe_path}" -RScriptingSystem:RunScript(ProjectName="{script_path}"^|ProcName="Altium_API>Run")'
@@ -1474,10 +1519,69 @@ async def create_footprints_batch(ctx: Context, spec_file: str) -> str:
     result = response.get("result", {})
     return json.dumps(result, indent=2) if not isinstance(result, str) else result
 
+def circuit_spec(parts: list, wires: list = None, junctions: list = None, net_labels: list = None,
+                 power_ports: list = None, notes: list = None, save_path: str = None) -> list:
+    """build_schematic's arguments as the bridge's pipe-delimited spec lines; ValueError names what is wrong."""
+    lines = []
+    if save_path is not None:
+        target = Path(save_path)
+        if not target.is_absolute() or target.suffix.lower() != ".schdoc":
+            raise ValueError(f"save_path must be the full path of a .SchDoc: {save_path}")
+        if not target.parent.is_dir():
+            raise ValueError(f"save_path's folder does not exist: {target.parent}")
+        if target.exists():
+            raise ValueError(f"save_path exists; build_schematic writes a new sheet only: {save_path}")
+        lines.append(f"SAVE|{target}")
+    for p in parts:
+        for key in ("designator", "symbol_library", "symbol", "x", "y"):
+            if key not in p:
+                raise ValueError(f"part missing required key '{key}': {p}")
+        lines.append("PART|{}|{}|{}|{}|{}|{}|{}|{}".format(
+            p["designator"], p["symbol_library"], p["symbol"],
+            p.get("design_item_id", ""), int(p["x"]), int(p["y"]),
+            int(p.get("orientation", 0)), 1 if p.get("mirror") else 0))
+        if p.get("comment"):
+            lines.append(f"COMMENT|{p['comment']}")
+        if p.get("footprint"):
+            lines.append(f"FOOTPRINT|{p['footprint']}")
+        if p.get("description"):
+            lines.append(f"DESCRIPTION|{p['description']}")
+        for name, val in (p.get("parameters") or {}).items():
+            lines.append(f"PARAM|{name}|{val}")
+
+    # The bridge can only read .SchLib files, and asked to open a path that
+    # does not exist Altium creates an empty library of that name instead -
+    # which used to give an empty sheet reported as success (issue #19)
+    for lib in sorted({str(p["symbol_library"]) for p in parts}):
+        if not lib.lower().endswith(".schlib") or not os.path.isfile(lib):
+            raise ValueError("symbol_library must be the full path of an existing "
+                             ".SchLib file (integrated libraries such as .IntLib "
+                             f"are not supported): {lib}")
+
+    for route in (wires or []):
+        if len(route) < 4 or len(route) % 2:
+            raise ValueError(f"wire needs an even count of >=4 coords: {route}")
+        lines.append("WIRE|" + "|".join(str(int(v)) for v in route))
+    for j in (junctions or []):
+        lines.append(f"JUNCTION|{int(j['x'])}|{int(j['y'])}")
+    for n in (net_labels or []):
+        lines.append("NETLABEL|{}|{}|{}|{}".format(
+            int(n["x"]), int(n["y"]), int(n.get("orientation", 0)), n["text"]))
+    for pw in (power_ports or []):
+        lines.append("POWER|{}|{}|{}|{}|{}|{}".format(
+            int(pw["x"]), int(pw["y"]), int(pw.get("orientation", 3)),
+            int(pw.get("style", 5)), pw["text"],
+            1 if pw.get("show_net_name") else 0))
+    for nt in (notes or []):
+        lines.append(f"NOTE|{int(nt['x'])}|{int(nt['y'])}|{nt['text']}")
+    return lines
+
+
 @mcp.tool()
 async def build_schematic(ctx: Context, parts: list, wires: list = None,
                           junctions: list = None, net_labels: list = None,
-                          power_ports: list = None, notes: list = None) -> str:
+                          power_ports: list = None, notes: list = None,
+                          save_path: str = None) -> str:
     """
     Build a wired schematic on a NEW sheet from a circuit description.
 
@@ -1516,59 +1620,22 @@ async def build_schematic(ctx: Context, parts: list, wires: list = None,
             "show_net_name":false}]. Harvest style/orientation from an existing
             sheet rather than guessing: 5 = digital ground, 2 = supply bar.
         notes: [{"x":..,"y":..,"text":".."}] free text.
+        save_path: full path of a .SchDoc that does not exist yet, in an
+            existing folder. The sheet is saved there and closed; without it
+            the sheet stays open and unsaved. Either way it is kept out of
+            the focused project: a project that lists the path takes it in
+            when opened.
 
     Returns:
-        JSON with the created sheet name, counts, and the pin map - every
-        placed pin's true connection point, for routing a follow-up call.
+        JSON with the created sheet name (its path once saved), counts, and
+        the pin map - every placed pin's true connection point, for routing a
+        follow-up call.
     """
     logger.info(f"Building schematic: {len(parts)} parts")
-
-    lines = []
-    for p in parts:
-        for key in ("designator", "symbol_library", "symbol", "x", "y"):
-            if key not in p:
-                return json.dumps({"success": False,
-                                   "error": f"part missing required key '{key}': {p}"})
-        lines.append("PART|{}|{}|{}|{}|{}|{}|{}|{}".format(
-            p["designator"], p["symbol_library"], p["symbol"],
-            p.get("design_item_id", ""), int(p["x"]), int(p["y"]),
-            int(p.get("orientation", 0)), 1 if p.get("mirror") else 0))
-        if p.get("comment"):
-            lines.append(f"COMMENT|{p['comment']}")
-        if p.get("footprint"):
-            lines.append(f"FOOTPRINT|{p['footprint']}")
-        if p.get("description"):
-            lines.append(f"DESCRIPTION|{p['description']}")
-        for name, val in (p.get("parameters") or {}).items():
-            lines.append(f"PARAM|{name}|{val}")
-
-    # The bridge can only read .SchLib files, and asked to open a path that
-    # does not exist Altium creates an empty library of that name instead -
-    # which used to give an empty sheet reported as success (issue #19)
-    for lib in sorted({str(p["symbol_library"]) for p in parts}):
-        if not lib.lower().endswith(".schlib") or not os.path.isfile(lib):
-            return json.dumps({"success": False,
-                               "error": "symbol_library must be the full path of an existing "
-                                        ".SchLib file (integrated libraries such as .IntLib "
-                                        f"are not supported): {lib}"})
-
-    for route in (wires or []):
-        if len(route) < 4 or len(route) % 2:
-            return json.dumps({"success": False,
-                               "error": f"wire needs an even count of >=4 coords: {route}"})
-        lines.append("WIRE|" + "|".join(str(int(v)) for v in route))
-    for j in (junctions or []):
-        lines.append(f"JUNCTION|{int(j['x'])}|{int(j['y'])}")
-    for n in (net_labels or []):
-        lines.append("NETLABEL|{}|{}|{}|{}".format(
-            int(n["x"]), int(n["y"]), int(n.get("orientation", 0)), n["text"]))
-    for pw in (power_ports or []):
-        lines.append("POWER|{}|{}|{}|{}|{}|{}".format(
-            int(pw["x"]), int(pw["y"]), int(pw.get("orientation", 3)),
-            int(pw.get("style", 5)), pw["text"],
-            1 if pw.get("show_net_name") else 0))
-    for nt in (notes or []):
-        lines.append(f"NOTE|{int(nt['x'])}|{int(nt['y'])}|{nt['text']}")
+    try:
+        lines = circuit_spec(parts, wires, junctions, net_labels, power_ports, notes, save_path)
+    except ValueError as e:
+        return json.dumps({"success": False, "error": str(e)})
 
     spec_path = Path("C:/Users/Public/altium_mcp/circuit_spec.txt")
     spec_path.parent.mkdir(parents=True, exist_ok=True)

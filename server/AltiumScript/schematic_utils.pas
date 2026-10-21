@@ -1685,6 +1685,8 @@ var
     Prim, Param, Obj : ISch_GraphicalObject;
     Impl : ISch_Implementation;
     Rec, Kind, CurLib, PName, PVal, Adopted, Missing, Ok : String;
+    SavePath, Saved, SheetName : String;
+    SrvDoc : IServerDocument;
     Proj : IProject;
     i, fld, vtx, PartCount, GfxCount, PinCount : Integer;
     HotX, HotY : Integer;
@@ -1702,6 +1704,22 @@ begin
     Spec.LoadFromFile(SpecPath);
     Placement := TStringList.Create;
     if FileExists(PlacementPath) then Placement.LoadFromFile(PlacementPath);
+
+    // SAVE|<path>: save the finished sheet there and close it. The server
+    // refuses an existing file; a document Altium has open under that path
+    // is refused here, before anything is built.
+    SavePath := '';
+    for i := 0 to Spec.Count - 1 do
+        if (GetFieldFromPipeString(Spec[i], 0) = 'SAVE') then
+            SavePath := GetFieldFromPipeString(Spec[i], 1);
+    if (SavePath <> '') and (Client.GetDocumentByPath(SavePath) <> nil) then
+    begin
+        Spec.Free;
+        Placement.Free;
+        Result := '{"success": false, "error": "' + JSONEscapeString(SavePath) +
+                  ' is open in Altium - refusing to save over it"}';
+        Exit;
+    end;
 
     // SAFETY: opening a symbol library makes THAT document current. Stray
     // components were once registered into shared libraries on a read-only
@@ -1722,6 +1740,23 @@ begin
         Placement.Free;
         Result := '{"success": false, "error": "target is not a schematic - refusing to build"}';
         Exit;
+    end;
+
+    // The new sheet's server document, taken while its view is current (the
+    // libraries opened below take the focus). A fresh SheetN name can match a
+    // project sheet, so it is not looked up by path.
+    SrvDoc := nil;
+    if (SavePath <> '') then
+    begin
+        if (Client.CurrentView <> nil) then SrvDoc := Client.CurrentView.OwnerDocument;
+        if (SrvDoc = nil) or (SrvDoc.Kind <> 'SCH') or
+           (ExtractFileName(SrvDoc.FileName) <> ExtractFileName(TargetDoc.DocumentName)) then
+        begin
+            Spec.Free;
+            Placement.Free;
+            Result := '{"success": false, "error": "the new sheet is not the current view - refusing to save"}';
+            Exit;
+        end;
     end;
 
     // DM_CreateNewDocument attaches the new sheet to the FOCUSED PROJECT, so
@@ -2002,8 +2037,24 @@ begin
     PinMap.SaveToFile('C:\Users\Public\altium_mcp\pin_map.txt');
     PinMap.Free;
 
+    // Saved only when the file is on disk afterwards; then the sheet closes,
+    // so the project that lists the path opens it from there. Its name is
+    // read before the close frees the document.
     if (Missing = '') then Ok := 'true' else Ok := 'false';
-    Result := '{"success": ' + Ok + ', "detached_from": "' + Adopted + '", "sheet": "' + TargetDoc.DocumentName +
+    Saved := '';
+    if (SavePath <> '') then
+    begin
+        SrvDoc.SetFileName(SavePath);
+        SrvDoc.Modified := True;
+        SrvDoc.DoFileSave('');
+        if FileExists(SavePath) then Saved := SavePath else Ok := 'false';
+    end;
+    SheetName := TargetDoc.DocumentName;
+    if (Saved <> '') then Client.CloseDocument(SrvDoc);
+
+    Result := '{"success": ' + Ok + ', "detached_from": "' + Adopted + '", "save_path": "' +
+              JSONEscapeString(SavePath) + '", "saved": "' + JSONEscapeString(Saved) +
+              '", "sheet": "' + JSONEscapeString(SheetName) +
               '", "parts": ' + IntToStr(PartCount) +
               ', "graphics": ' + IntToStr(GfxCount) +
               ', "pins": ' + IntToStr(PinCount) +
