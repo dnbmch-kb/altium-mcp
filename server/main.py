@@ -29,6 +29,7 @@ import re
 
 from altium_files import read_altium_text, write_altium_text
 from outjob_parser import parse_outjob
+import schematic_edit
 import script_lock
 
 # Configure logging
@@ -2831,6 +2832,154 @@ async def get_erc_violations(ctx: Context, compile: bool = True) -> str:
              [{level, type, detail}]
     """
     return await _simple_command("get_erc_violations", {"compile": compile}, "ERC violations")
+
+
+EDIT_SPEC_FILE = EXCHANGE_DIR / "edit_spec.txt"
+ANNOTATE_SPEC_FILE = EXCHANGE_DIR / "annotate_spec.txt"
+
+
+async def _spec_command(command: str, spec_file: Path, lines: list) -> str:
+    """Write a spec for the bridge and run the command that reads it; the bridge's JSON comes back as is."""
+    write_altium_text(spec_file, "\n".join(lines) + "\n")
+    response = await altium_bridge.execute_command(command, {})
+    if not response.get("success", False):
+        return json.dumps({"success": False, "error": response.get("error", "unknown error")})
+    result = response.get("result", {})
+    return result if isinstance(result, str) else json.dumps(result, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+async def open_project(ctx: Context, project_path: str) -> str:
+    """
+    Open an Altium project (or find it open) and open its schematic sheets.
+
+    Drives the live Altium: it opens documents on the user's screen.
+
+    Args:
+        project_path (str): full path of the .PrjPcb.
+
+    Returns:
+        str: JSON with success (true when the project is now the focused one), project, focused,
+             documents [{path, kind}]
+    """
+    path = Path(project_path)
+    if not path.is_absolute() or path.suffix.lower() != ".prjpcb" or not path.is_file():
+        return json.dumps({"success": False,
+                           "error": f"project_path must be the full path of an existing .PrjPcb: {project_path}"})
+    return await _simple_command("open_project", {"project_path": str(path)}, "open project")
+
+
+@mcp.tool()
+async def edit_schematic(ctx: Context, sheet: str, ops: list, power_nets: list = None, save: bool = True) -> str:
+    """
+    Edit an EXISTING schematic sheet: delete, rename, connect, place and replace parts.
+
+    Every connection the tool makes is a 100 mil stub out of the pin with a net label, or a power port for a
+    power net, so it never routes a wire across the sheet. Read the result's "errors": an op that cannot be
+    carried out changes nothing and is listed there; the rest still runs. Verify with a connectivity readback
+    of the saved sheet (c:/Projects/tools/altium/sch_nets.py), not with the result alone.
+
+    Components are referenced as "uid:<UNIQUEID>" (read from the file) or "des:<designator>".
+
+    Args:
+        sheet: full path of the .SchDoc (opened if it is not).
+        ops: list of dicts, run in order:
+            {"op": "delete", "uid"}                      any sheet object by unique id
+            {"op": "delete_component", "uid", "dead_ends": true, "keep": [uid...]}
+                                                         a part, and with dead_ends the wires left connecting
+                                                         nothing plus the labels and ports on them
+            {"op": "rename_label", "uid", "text"}        {"op": "rename_net", "old", "new"} (every label)
+            {"op": "port_rename", "uid", "new"}          {"op": "label_to_port", "uid", "text"}
+            {"op": "attach_pin", "comp", "pin", "net"}   stub + label or port on a pin
+            {"op": "detach_pin", "comp", "pin"}          removes the port, label or stub at a pin; a wire that
+                                                         also serves something else is refused
+            {"op": "no_erc_pins", "comp", "pins": [..]}
+            {"op": "attach_entry", "symbol", "entry", "net"}   a sheet symbol's entry
+            {"op": "place", "designator", "symbol_library", "lib_ref", "x", "y", "orient", "mirror",
+             "link_library", "db_table", "design_item", "footprint", "comment", "parameters": {},
+             "pins": {pin: net}, "no_erc": [pin]}       symbol copied from a .SchLib; link_library (e.g.
+                                                         "dnbm.IntLib" or "Res-Gen.DbLib") is what it links to
+            {"op": "replace", "comp", "symbol_library", "lib_ref", "pin_map": {old: new},
+             "nets": {new_pin: net}, place's link fields} every mapped new pin needs its net: the old pin's end
+                                                         gets the same net, so the old wiring keeps it
+            {"op": "relink", "comp", "link_library", "db_table", "design_item", "footprint", "comment",
+             "parameters": {}}                           changes a part's library link and keeps its symbol
+        power_nets: nets drawn as power ports (GND, 3V3 and 5V always are).
+        save: save the sheet afterwards (default true).
+
+    Returns:
+        str: JSON with success, sheet, saved, ops, errors [..], placed [{designator, uid, x, y,
+             pins [[pin, x, y]], unassigned_pins}]
+    """
+    try:
+        lines = schematic_edit.edit_spec(sheet, ops, power_nets, save)
+    except ValueError as e:
+        return json.dumps({"success": False, "error": str(e)})
+    return await _spec_command("edit_schematic", EDIT_SPEC_FILE, lines)
+
+
+@mcp.tool()
+async def replace_component(ctx: Context, sheet: str, comp: str, symbol_library: str, lib_ref: str,
+                            pin_map: dict, nets: dict, no_erc: list = None, link_library: str = None,
+                            db_table: str = None, design_item: str = None, footprint: str = None,
+                            comment: str = None, parameters: dict = None, orient: int = None,
+                            mirror: bool = False, power_nets: list = None, save: bool = True) -> str:
+    """
+    Swap a placed part for another symbol and keep its connections, mapping pins by FUNCTION.
+
+    The old pin ends get net labels carrying each pin's net, the old part goes, the new one takes its place
+    (stepped right until no pin lands on existing wiring) and every new pin gets a stub with its net. Map by
+    function, never by number: two diode symbols can number the cathode differently.
+
+    Args:
+        sheet: full path of the .SchDoc.
+        comp: "uid:<UNIQUEID>" or "des:<designator>" of the part to replace; its designator is kept.
+        symbol_library: full path of the .SchLib holding the new symbol.
+        lib_ref: the new symbol's name.
+        pin_map: {old_pin: new_pin}.
+        nets: {new_pin: net}, required for every mapped pin; extra entries connect unmapped new pins.
+        no_erc: new pins to mark No-ERC.
+        link_library, db_table, design_item, footprint, comment, parameters: the new part's library link.
+        orient: 0-3, default the old part's. mirror: mirror the new part.
+        power_nets: nets drawn as power ports (GND, 3V3, 5V always). save: save afterwards.
+
+    Returns:
+        str: edit_schematic's JSON.
+    """
+    op = dict(op="replace", comp=comp, symbol_library=symbol_library, lib_ref=lib_ref, pin_map=pin_map,
+              nets=nets, no_erc=no_erc or [], link_library=link_library, db_table=db_table,
+              design_item=design_item, footprint=footprint, comment=comment, parameters=parameters or {},
+              mirror=mirror)
+    if orient is not None:
+        op["orient"] = orient
+    try:
+        lines = schematic_edit.edit_spec(sheet, [op], power_nets, save)
+    except ValueError as e:
+        return json.dumps({"success": False, "error": str(e)})
+    return await _spec_command("edit_schematic", EDIT_SPEC_FILE, lines)
+
+
+@mcp.tool()
+async def annotate_schematic(ctx: Context, sheets: list, assignments: dict, save: bool = True) -> str:
+    """
+    Set component designators by unique id across one or more sheets.
+
+    Explicit on purpose: compute the assignment first (schematic_edit.auto_designators gives the usual one:
+    the next free number per prefix, top to bottom, then left to right) and review it before it is written.
+
+    Args:
+        sheets: full paths of the .SchDoc files to search.
+        assignments: {unique_id: designator}; designators must be unique and annotated.
+        save: save every sheet afterwards.
+
+    Returns:
+        str: JSON with success, assigned [{uid, old, new}], missing_uids
+    """
+    try:
+        lines = schematic_edit.annotate_spec(sheets, assignments, save)
+    except ValueError as e:
+        return json.dumps({"success": False, "error": str(e)})
+    return await _spec_command("annotate_schematic", ANNOTATE_SPEC_FILE, lines)
 
 
 @mcp.tool()
