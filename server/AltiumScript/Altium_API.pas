@@ -1184,12 +1184,6 @@ begin
             Result := GetBoardSummary(ROOT_DIR);
         'get_component_primitives':
             Result := ExecuteGetComponentPrimitives(RequestData);
-        'edit_schematic':
-            Result := ExecuteEditSchematic(RequestData);
-        'annotate_schematic':
-            Result := ExecuteAnnotateSchematic(RequestData);
-        'open_project':
-            Result := ExecuteOpenProject(RequestData);
     else
         LogScriptError('Error: Unknown command: ' + CommandName);
     end;
