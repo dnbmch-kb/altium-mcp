@@ -21,6 +21,14 @@ library batch, laser-calib's footprint library). Each holds the lock in [`../ser
 arrives; a busy Altium is reported with the holder's name, pid and start. The dialog closers here touch only
 windows owned by `X2.EXE` (`capture_window.owner_exe`), never another application's.
 
+## Calling a tool from a shell
+
+`dev/call_tool.py` calls any server tool without an MCP client, through FastMCP's own `call_tool`: the same
+validation and the same lock. It serves a session whose MCP servers loaded before altium was registered, a
+subagent that inherited none, and scripts; `server/main.py` is imported per run, so a tool edit needs no restart.
+Run it with the server's venv: `%USERPROFILE%\.altium-mcp\venv\Scripts\python.exe dev/call_tool.py --list`,
+`… <tool> --doc`, `… <tool> '{"arg": 1}'` or `--args-file`; an image result goes to `--out`.
+
 ## Why
 
 Altium has no headless test mode for DelphiScript, and its failure modes are
