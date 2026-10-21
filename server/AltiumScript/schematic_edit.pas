@@ -916,7 +916,7 @@ begin
                 j := i + 1;
                 while (j < Spec.Count) and (GetFieldFromPipeString(Spec[j], 0) <> 'END') do
                 begin
-                    if (GetFieldFromPipeString(Spec[j], 0) = 'MAP') then
+                    if (GetFieldFromPipeString(Spec[j], 0) = 'MAP') or (GetFieldFromPipeString(Spec[j], 0) = 'MAPOLD') then
                         EdLabelOldEnd(Old, GetFieldFromPipeString(Spec[j], 1), GetFieldFromPipeString(Spec[j], 3));
                     j := j + 1;
                 end;

@@ -154,8 +154,10 @@ def edit_spec(sheet, ops, power_nets=None, save=True):
                 if new not in nets:
                     raise ValueError(f"{what}: no net for new pin {new} (mapped from old pin {old}); "
                                      "give every mapped pin its net in 'nets'")
+                # several old pins onto one new pin (an exposed pad's numbered copies): one stub, every old end named
+                kind = "MAPOLD" if new in mapped else "MAP"
                 mapped.setdefault(new, []).append(_text(old, what + " old pin"))
-                lines.append(_net_line("MAP", f"{old}|{new}", nets[new], power))
+                lines.append(_net_line(kind, f"{old}|{new}", nets[new], power))
             extra = {k: v for k, v in nets.items() if k not in mapped}
             lines += _part_block(dict(op, pins=extra), what, power) + ["END"]
         elif kind == "relink":

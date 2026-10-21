@@ -63,6 +63,12 @@ class EditSpecTest(unittest.TestCase):
         self.assertIn("MAP|2|1|5V|2|1", lines)            # old cathode 2 -> new cathode 1
         self.assertIn("MAP|1|2|GND|5|3", lines)
 
+    def test_several_old_pins_onto_one_new_pin_stub_it_once(self):
+        lines = self.spec([{"op": "replace", "comp": "des:U1", "symbol_library": str(self.lib), "lib_ref": "MOD",
+                            "pin_map": {"49_1": "49", "49_2": "49"}, "nets": {"49": "GND"}}])
+        self.assertIn("MAP|49_1|49|GND|5|3", lines)
+        self.assertIn("MAPOLD|49_2|49|GND|5|3", lines)
+
     def test_replace_connects_extra_new_pins_and_marks_no_erc(self):
         lines = self.spec([{"op": "replace", "comp": "des:IC3", "symbol_library": str(self.lib), "lib_ref": "TPS7A2633DRVR",
                             "pin_map": {"1": "6", "5": "1"}, "nets": {"6": "LDO_IN", "1": "LDO_OUT", "4": "LDO_IN"},
