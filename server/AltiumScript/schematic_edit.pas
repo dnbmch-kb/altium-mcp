@@ -533,6 +533,37 @@ begin
     EdReportPlaced(Comp, Unassigned);
 end;
 
+// Any component pin end lying on W, at a vertex or mid-segment
+function EdPinOnWire(W: ISch_Wire): Boolean;
+var
+    Iter, PIter : ISch_Iterator;
+    Comp        : ISch_Component;
+    Pin         : ISch_Pin;
+    X, Y, D     : Integer;
+begin
+    Result := False;
+    Iter := EdDoc.SchIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(eSchComponent));
+    Comp := Iter.FirstSchObject;
+    while (Comp <> nil) and (not Result) do
+    begin
+        PIter := Comp.SchIterator_Create;
+        PIter.AddFilter_ObjectSet(MkSet(ePin));
+        PIter.AddFilter_CurrentPartPrimitives;
+        PIter.AddFilter_CurrentDisplayModePrimitives;
+        Pin := PIter.FirstSchObject;
+        while (Pin <> nil) and (not Result) do
+        begin
+            EdPinEnd(Pin, X, Y, D);
+            if EdWireTouches(W, X, Y) then Result := True;
+            Pin := PIter.NextSchObject;
+        end;
+        Comp.SchIterator_Destroy(PIter);
+        Comp := Iter.NextSchObject;
+    end;
+    EdDoc.SchIterator_Destroy(Iter);
+end;
+
 // Delete Comp and, with DeadEnds, every wire left connecting nothing, then the labels and ports on them
 procedure EdDeleteComponent(Comp: ISch_Component; DeadEnds: Boolean; Keep: String);
 var
@@ -583,6 +614,7 @@ begin
                     for k := 1 to W.VerticesCount do
                         if (Points.IndexOf(IntToStr(CoordToMils(W.Vertex[k].X)) + ',' + IntToStr(CoordToMils(W.Vertex[k].Y))) < 0) then
                             if EdLiveAt(CoordToMils(W.Vertex[k].X), CoordToMils(W.Vertex[k].Y), W) then n := n + 1;
+                    if (n = 0) and EdPinOnWire(W) then n := 1;      // a pin met mid-segment keeps it alive
                     if (n = 0) then Doomed.Add(W.UniqueId);
                 end;
             end;
