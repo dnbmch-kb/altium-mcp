@@ -632,7 +632,7 @@ begin
         OutputLines := TStringList.Create;
         try
             OutputLines.Text := BuildJSONObject(ResultProps);
-            Result := WriteJSONToFile(OutputLines, ROOT_DIR);
+            Result := WriteJSONToFile(OutputLines, ROOT_DIR + 'temp_outjob_containers.json');
         finally
             OutputLines.Free;
         end;
@@ -829,7 +829,7 @@ begin
         OutputLines := TStringList.Create;
         try
             OutputLines.Text := BuildJSONObject(ResultProps);
-            Result := WriteJSONToFile(OutputLines, ROOT_DIR);
+            Result := WriteJSONToFile(OutputLines, ROOT_DIR + 'temp_run_output_jobs.json');
         finally
             OutputLines.Free;
         end;
