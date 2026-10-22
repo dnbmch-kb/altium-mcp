@@ -929,6 +929,8 @@ begin
             end
             else
             begin
+                // one part of a multi-part symbol: its pins are the ones EdPut and the PIN lines see
+                if (GetFieldFromPipeString(Rec, 13) <> '') then Comp.CurrentPartID := StrToInt(GetFieldFromPipeString(Rec, 13));
                 Comp.Designator.Text := GetFieldFromPipeString(Rec, 1);
                 if not EdPut(Comp, StrToInt(GetFieldFromPipeString(Rec, 4)), StrToInt(GetFieldFromPipeString(Rec, 5)),
                              StrToInt(GetFieldFromPipeString(Rec, 6)), StrToInt(GetFieldFromPipeString(Rec, 7))) then

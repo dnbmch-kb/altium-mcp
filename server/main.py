@@ -2897,8 +2897,10 @@ async def edit_schematic(ctx: Context, sheet: str, ops: list, power_nets: list =
             {"op": "attach_entry", "symbol", "entry", "net"}   a sheet symbol's entry
             {"op": "place", "designator", "symbol_library", "lib_ref", "x", "y", "orient", "mirror",
              "link_library", "db_table", "design_item", "footprint", "comment", "parameters": {},
-             "pins": {pin: net}, "no_erc": [pin]}       symbol copied from a .SchLib; link_library (e.g.
-                                                         "dnbm.IntLib" or "Res-Gen.DbLib") is what it links to
+             "pins": {pin: net}, "no_erc": [pin], "part"} symbol copied from a .SchLib; link_library (e.g.
+                                                         "dnbm.IntLib" or "Res-Gen.DbLib") is what it links to;
+                                                         part (1 = A, 2 = B, ...) places one part of a multi-part
+                                                         symbol, one place op per part under one designator
             {"op": "replace", "comp", "symbol_library", "lib_ref", "pin_map": {old: new},
              "nets": {new_pin: net}, place's link fields} every mapped new pin needs its net: the old pin's end
                                                          gets the same net, so the old wiring keeps it

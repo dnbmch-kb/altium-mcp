@@ -135,10 +135,16 @@ def edit_spec(sheet, ops, power_nets=None, save=True):
             lines.append(f"ENTRY|{_text(op['symbol'], what + ' symbol')}|{_text(op['entry'], what + ' entry')}|"
                          + _net_line("X", "entry", op["net"], power)[len("X|entry|"):])
         elif kind == "place":
-            lines.append("PLACE|{}|{}|{}|{}|{}|{}|{}|{}".format(
+            line = "PLACE|{}|{}|{}|{}|{}|{}|{}|{}".format(
                 _text(op["designator"], what + " designator"), _schlib(op["symbol_library"], what),
                 _text(op["lib_ref"], what + " lib_ref"), _int(op["x"], what + " x"), _int(op["y"], what + " y"),
-                int(op.get("orient", 0)) % 4, 1 if op.get("mirror") else 0, _link_fields(op, what)))
+                int(op.get("orient", 0)) % 4, 1 if op.get("mirror") else 0, _link_fields(op, what))
+            if op.get("part") is not None:                # one part of a multi-part symbol (2 = B, ...)
+                part = op["part"]
+                if isinstance(part, bool) or not isinstance(part, int) or part < 1:
+                    raise ValueError(f"{what}: part must be a whole number from 1: {part!r}")
+                line += f"|{part}"
+            lines.append(line)
             lines += _part_block(op, what, power) + ["END"]
         elif kind == "replace":
             lines.append("REPLACE|{}|{}|{}|{}|{}|{}".format(

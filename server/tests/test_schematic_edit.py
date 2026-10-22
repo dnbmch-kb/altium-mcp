@@ -53,6 +53,14 @@ class EditSpecTest(unittest.TestCase):
         self.assertEqual(lines[i + 1], "PARAM|Value|1k")
         self.assertEqual(lines[i + 2:i + 5], ["PIN|1|SW_PC|-1|-1", "PIN|2|PC_HOLD_G|-1|-1", "END"])
 
+    def test_place_part_appends_the_part_of_a_multi_part_symbol(self):
+        op = {"op": "place", "designator": "U7", "symbol_library": str(self.lib), "lib_ref": "TLV9152IDR",
+              "x": 1000, "y": 2000, "part": 2, "pins": {"5": "IN_B"}}
+        lines = self.spec([op])
+        self.assertIn(f"PLACE|U7|{self.lib}|TLV9152IDR|1000|2000|0|0||||||2", lines)
+        with self.assertRaisesRegex(ValueError, "part must be a whole number"):
+            self.spec([dict(op, part=0)])
+
     def test_replace_needs_a_net_for_every_mapped_pin_and_maps_by_function(self):
         op = {"op": "replace", "comp": "uid:XHHAWBYW", "symbol_library": str(self.lib), "lib_ref": "BZT52H-B5V6-QX",
               "pin_map": {"2": "1", "1": "2"}, "nets": {"1": "5V"}}
