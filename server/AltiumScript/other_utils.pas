@@ -161,7 +161,10 @@ begin
        (CommandName = 'create_pcb_footprint') or
        (CommandName = 'get_project_info') or
        (CommandName = 'get_project_components') or
-       (CommandName = 'get_erc_violations') then
+       (CommandName = 'get_erc_violations') or
+       (CommandName = 'edit_schematic') or
+       (CommandName = 'annotate_schematic') or
+       (CommandName = 'open_project') then
     begin
         Result := True;
         Exit;

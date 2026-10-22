@@ -68,7 +68,7 @@ function EdOwnedBySheet(Obj: ISch_GraphicalObject): Boolean;
 begin
     Result := False;
     if (Obj.Container <> nil) then
-        Result := (Obj.Container.ObjectId = eSchDocument);   // 32
+        Result := (Obj.Container.ObjectId = 32);   // the sheet; DelphiScript declares no eSchDocument
 end;
 
 function EdFindUid(Uid: String): ISch_GraphicalObject;
@@ -168,14 +168,19 @@ var
     Iter, PinIter : ISch_Iterator;
     Obj, Pin      : ISch_GraphicalObject;
     PX, PY, PD    : Integer;
+    SkipAddr      : Integer;
 begin
     Result := False;
+    // Identity by object address: DelphiScript's <> on two interface references to one
+    // object is not reliable, and a part then collides with its own pins.
+    SkipAddr := 0;
+    if (Skip <> nil) then SkipAddr := Skip.I_ObjectAddress;
     Iter := EdDoc.SchIterator_Create;
     Iter.AddFilter_ObjectSet(MkSet(eWire, eNetLabel, ePowerObject, ePort, eSchComponent));
     Obj := Iter.FirstSchObject;
     while (Obj <> nil) and (not Result) do
     begin
-        if (Obj <> Skip) and EdOwnedBySheet(Obj) then
+        if (Obj.I_ObjectAddress <> SkipAddr) and EdOwnedBySheet(Obj) then
         begin
             if (Obj.ObjectId = eWire) then Result := EdWireTouches(Obj, X, Y)
             else if (Obj.ObjectId = eSchComponent) then

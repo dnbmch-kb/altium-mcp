@@ -219,6 +219,8 @@ Files exchanged with the scripts are read and written the way Altium does: in th
 This is a third-party integration and not made by Altium. Made by [coffeenmusic](https://x.com/coffeenmusic)
 
 # TODO:
+- `edit_schematic` place: a part copied out of a .SchLib keeps the library symbol's UniqueId, so every copy of one symbol shares it until Altium reassigns them on the next load (27 of S31DEV's 41 parts, 2026-10-22). Give each placed part a fresh id after `EdReplicate`; until then open and save the sheet once before an ECO.
+- The bridge waits 120 s for a response (`server/main.py`); a longer `edit_schematic` batch reports a timeout while Altium finishes and saves it, and the script lock is already released. Split batches (about 15 parts run in 25 s).
 - Change selection filter:
   - `scripts-libraries\Scripts - PCB\FilterObjects\`
   - `scripts-libraries\Scripts - SCH\SelectionFilter\`
