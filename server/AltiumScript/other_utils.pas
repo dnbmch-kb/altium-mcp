@@ -85,6 +85,13 @@ var
     DocKind: String;
 begin
     result := '';
+    // The focused OutJob first: with several projects open, the first project's OutJob is not the one meant
+    Doc := GetWorkspace.DM_FocusedDocument;
+    if (Doc <> Nil) and (Doc.DM_DocumentKind = 'OUTPUTJOB') then
+    begin
+        result := Doc.DM_FullPath;
+        Exit;
+    end;
     for ProjectIdx := 0 to GetWorkspace.DM_ProjectCount - 1 do
     begin
         Project := GetWorkspace.DM_Projects(ProjectIdx);
