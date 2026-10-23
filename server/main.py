@@ -27,7 +27,7 @@ import base64
 import glob
 import re
 
-from altium_files import ansi_script, read_altium_text, write_altium_text
+from altium_files import altium_env, ansi_script, read_altium_text, write_altium_text
 from outjob_parser import outjob_project, output_folder, parse_outjob, produced, snapshot
 import schematic_edit
 import script_lock
@@ -459,7 +459,7 @@ class AltiumBridge:
             logger.info(f"Running command: {command}")
             
             # Start the process
-            process = subprocess.Popen(command, shell=True)
+            process = subprocess.Popen(command, shell=True, env=altium_env())
             
             # Don't wait for completion - Altium will run the script and generate the response
             logger.info(f"Launched Altium with script, process ID: {process.pid}")
@@ -1303,7 +1303,7 @@ async def _run_altium_script(ctx: Context, script: str, timeout_seconds: int = 1
     sandbox_prj = AltiumBridge._resolve_msix_path(str(SANDBOX_PRJ))
     cmd = (f'"{altium_bridge.config.altium_exe_path}" -RScriptingSystem:RunScript('
            f'ProjectName="{sandbox_prj}"^|ProcName="Sandbox>Run")')
-    subprocess.Popen(cmd, shell=True)
+    subprocess.Popen(cmd, shell=True, env=altium_env())
 
     start = time.time()
     # Keyed by window: a dialog that ignores WM_CLOSE (Yes/No boxes do) is

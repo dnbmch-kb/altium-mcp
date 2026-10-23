@@ -27,6 +27,7 @@ Usage:
 """
 import ctypes
 import json
+import os
 import subprocess
 import sys
 import time
@@ -34,6 +35,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from capture_window import find_windows, _title, _class, owner_exe
+
+# an Altium started with CLAUDE_PROJECT_DIR saves house library paths through it (server/altium_files.py altium_env)
+ALTIUM_ENV = {k: v for k, v in os.environ.items() if k.upper() != "CLAUDE_PROJECT_DIR"}
 
 REPO = Path(__file__).resolve().parent.parent
 EXCHANGE = Path("C:/Users/Public/altium_mcp")
@@ -81,7 +85,7 @@ def stop_via_process():
     if not exe:
         return False, "X2.EXE not found"
     try:
-        subprocess.Popen(f'"{exe}" -REditScript:Stop', shell=True)
+        subprocess.Popen(f'"{exe}" -REditScript:Stop', shell=True, env=ALTIUM_ENV)
         time.sleep(1.5)
         return True, "EditScript:Stop dispatched"
     except OSError as e:
@@ -130,7 +134,7 @@ def executor_alive(timeout=45):
         exe = altium_exe()
         subprocess.Popen(
             f'"{exe}" -RScriptingSystem:RunScript('
-            f'ProjectName="{PROBE_PRJ}"^|ProcName="Sandbox>Run")', shell=True)
+            f'ProjectName="{PROBE_PRJ}"^|ProcName="Sandbox>Run")', shell=True, env=ALTIUM_ENV)
         start = time.time()
         while time.time() - start < timeout:
             if PROBE_RESULT.exists():

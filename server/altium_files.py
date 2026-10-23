@@ -14,7 +14,16 @@ the way Altium's own editor saves one, so a character the code page lacks is
 refused by name instead of arriving as two characters or a question mark.
 """
 import codecs
+import os
 from pathlib import Path
+
+
+def altium_env() -> dict:
+    """The environment for a command that may start Altium: this one without CLAUDE_PROJECT_DIR. Altium saves an
+    installed library's path with the most specific environment variable put in, so one started with
+    CLAUDE_PROJECT_DIR=c:/Projects stores every house library as %AltiumSystemLibrary%%CLAUDE_PROJECT_DIR%\...,
+    which an Altium started without it cannot resolve (2026-10-23)."""
+    return {k: v for k, v in os.environ.items() if k.upper() != "CLAUDE_PROJECT_DIR"}
 
 
 def read_altium_text(path) -> str:

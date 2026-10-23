@@ -58,7 +58,7 @@ from unwedge import unwedge  # noqa: E402
 from capture_window import owner_exe  # noqa: E402
 sys.path.insert(0, str(REPO / "server"))
 import script_lock  # noqa: E402  one script at a time across every tool driving Altium
-from altium_files import ansi_script, read_altium_text  # noqa: E402
+from altium_files import altium_env, ansi_script, read_altium_text  # noqa: E402
 
 
 def _title(hwnd):
@@ -202,7 +202,7 @@ def run(timeout=120, quiet=False):
 
     cmd = (f'"{config["altium_exe_path"]}" -RScriptingSystem:RunScript('
            f'ProjectName="{SANDBOX_PRJ}"^|ProcName="Sandbox>Run")')
-    subprocess.Popen(cmd, shell=True)
+    subprocess.Popen(cmd, shell=True, env=altium_env())
 
     start = time.time()
     dialogs = []
@@ -276,7 +276,7 @@ def restart_altium(wait=180):
     print("  >> restarting Altium to clear the wedged executor...")
     subprocess.run(["taskkill", "/F", "/IM", "X2.EXE"], capture_output=True)
     time.sleep(5)
-    subprocess.Popen(f'"{config["altium_exe_path"]}"', shell=True)
+    subprocess.Popen(f'"{config["altium_exe_path"]}"', shell=True, env=altium_env())
     # Altium is ready when a sandbox ping actually executes
     saved = SANDBOX_PAS.read_bytes()
     inject(PING_BODY)
