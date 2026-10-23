@@ -10,8 +10,8 @@
 
 const
     ED_STUB = 100;          // mils
-    ED_EDIT_SPEC = 'C:\Users\Public\altium_mcp\edit_spec.txt';
-    ED_ANNOTATE_SPEC = 'C:\Users\Public\altium_mcp\annotate_spec.txt';
+    ED_EDIT_SPEC = 'edit_spec.txt';             // in the request's folder (ROOT_DIR)
+    ED_ANNOTATE_SPEC = 'annotate_spec.txt';
 
 var
     EdDoc       : ISch_Document;
@@ -1100,6 +1100,11 @@ begin
     begin
         Rec := Spec[i];
         Kind := GetFieldFromPipeString(Rec, 0);
+        // one record per op the server can see; a part names its designator
+        if (Kind = 'PLACE') or (Kind = 'REPLACE') or (Kind = 'RELINK') then
+            BridgeProgress(LowerCase(Kind) + ' ' + GetFieldFromPipeString(Rec, 1), i, Spec.Count - 1)
+        else if (Pos('|' + Kind + '|', '|POWERNET|PIN|MAP|MAPOLD|NOPIN|PARAM|END|') = 0) then
+            BridgeProgress(LowerCase(Kind), i, Spec.Count - 1);
         if (Pos('|' + Kind + '|', '|POWERNET|SAVE|GEOMETRY|WIRE|JUNCTION|LABEL|PORT|') = 0) then EdOps := EdOps + 1;
 
         if (Kind = 'POWERNET') then
@@ -1401,12 +1406,12 @@ end;
 // Entry points for Altium_API's dispatcher
 function ExecuteEditSchematic(RequestData: TStringList): String;
 begin
-    Result := EditSchematicFromSpec(ED_EDIT_SPEC);
+    Result := EditSchematicFromSpec(ROOT_DIR + ED_EDIT_SPEC);
 end;
 
 function ExecuteAnnotateSchematic(RequestData: TStringList): String;
 begin
-    Result := AnnotateFromSpec(ED_ANNOTATE_SPEC);
+    Result := AnnotateFromSpec(ROOT_DIR + ED_ANNOTATE_SPEC);
 end;
 
 function ExecuteOpenProject(RequestData: TStringList): String;

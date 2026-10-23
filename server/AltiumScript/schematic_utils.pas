@@ -867,6 +867,7 @@ begin
             end
             else if (Kind = 'SYMBOL') then
             begin
+                BridgeProgress('symbol ' + Trim(GetFieldFromPipeString(Line, 1)), i, Lines.Count);
                 // Flush the previous symbol
                 if (CurrentName <> '') then
                 begin
@@ -1791,6 +1792,7 @@ begin
     begin
         Rec := Spec[i];
         Kind := GetFieldFromPipeString(Rec, 0);
+        BridgeProgress(LowerCase(Kind) + ' ' + GetFieldFromPipeString(Rec, 1), i, Spec.Count);
 
         if (Kind = 'PART') then
         begin
@@ -2041,7 +2043,7 @@ begin
         Prim := Iter.NextSchObject;
     end;
     TargetDoc.SchIterator_Destroy(Iter);
-    PinMap.SaveToFile('C:\Users\Public\altium_mcp\pin_map.txt');
+    PinMap.SaveToFile(ExtractFilePath(SpecPath) + 'pin_map.txt');    // beside the spec: the request's folder
     PinMap.Free;
 
     // Saved only when the file is on disk afterwards; then the sheet closes,

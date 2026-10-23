@@ -93,6 +93,7 @@ begin
                 end
                 else if (Kind = 'FOOTPRINT') then
                 begin
+                    BridgeProgress('footprint ' + GetFieldFromPipeString(Line, 1), i, Lines.Count);
                     PcbLib := GetPcbLibSafe(0);
                     // Focus can drift between chunks - retry via the opened
                     // document before giving up

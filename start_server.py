@@ -28,6 +28,7 @@ SCRIPT_DIR = Path(__file__).parent
 REQUIREMENTS = [
     "mcp[cli]==1.5.0",
     "pillow>=11.1.0",
+    "pypdfium2==5.14.0",   # get_screenshot rasterises Altium's PDF print
     "pywin32>=310",
 ]
 

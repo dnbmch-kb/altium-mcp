@@ -173,7 +173,7 @@
     },
     {
       "name": "get_screenshot",
-      "description": "Take a screenshot of the Altium window"
+      "description": "Picture of a PCB or schematic document printed by Altium itself (its state in memory), or of an Altium dialog"
     },
     {
       "name": "run_altium_script",

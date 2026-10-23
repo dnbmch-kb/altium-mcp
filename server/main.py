@@ -29,7 +29,9 @@ import re
 
 from altium_files import altium_env, ansi_script, read_altium_text, write_altium_text
 from outjob_parser import outjob_project, output_folder, parse_outjob, produced, snapshot
+import mailbox
 import schematic_edit
+import screenshot
 import script_lock
 import sheet_plan
 
@@ -60,16 +62,25 @@ LEGACY_CONFIG_FILE = MCP_DIR / "config.json"
 CONFIG_FILE = _data_dir() / "config.json"
 DEFAULT_SCRIPT_PATH = MCP_DIR / "AltiumScript" / "Altium_API.PrjScr"
 
-# Use a fixed exchange directory for request/response JSON files.
-# Both the Python MCP server and the Altium DelphiScript need to independently
-# resolve to the same directory. C:\Users\Public is writable by all users and
-# exists on every Windows machine. This avoids fragile script-project-path
-# resolution that breaks when Altium caches stale script projects.
+# The mailbox (mailbox.py has its layout): a fixed folder both this server and
+# the Altium DelphiScript resolve on their own. C:\Users\Public is writable by
+# all users and exists on every Windows machine, and Altium sees it under the
+# same path even when Claude Desktop's MSIX package redirects AppData.
 EXCHANGE_DIR = Path("C:/Users/Public/altium_mcp")
 EXCHANGE_DIR.mkdir(exist_ok=True)
-REQUEST_FILE = EXCHANGE_DIR / "request.json"
-RESPONSE_FILE = EXCHANGE_DIR / "response.json"
 BRIDGE_STAGE_DIR = EXCHANGE_DIR / "bridge"
+# A bridge call waits as long as the bridge reports progress and gives up when
+# no record lands for this many seconds. A command whose work is one blocking
+# Altium process (an output container, a print) reports nothing inside it.
+STALL_SECONDS = 120
+STALL_BY_COMMAND = {"run_output_jobs": 900, "take_view_screenshot": 300}
+# Altium's modal boxes, which hold a running script until they close
+DIALOG_CLASSES = ("#32770", "TMessageForm", "TForm_RunScriptParameters")
+# Altium refuses a RunScript while a script is still finishing; it is sent again this many times
+RUNSCRIPT_RETRIES = 5
+# After the answer lands the bridge script still returns; the lock is held this long more, so the next caller's
+# RunScript does not meet it finishing
+ANSWER_SETTLE = 0.3
 
 
 def stage_bridge(project: Path, root: Path = BRIDGE_STAGE_DIR) -> Path:
@@ -316,93 +327,148 @@ class AltiumBridge:
         # concurrent tool calls must be serialized or they clobber each other
         self._command_lock = asyncio.Lock()
 
-    async def execute_command(self, command: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute a command in Altium via the bridge script"""
+    async def execute_command(self, command: str, params: Dict[str, Any], files: Dict[str, str] = None,
+                              stall: float = None, ctx: Context = None) -> Dict[str, Any]:
+        """Run a command in Altium through the mailbox: params go into the request, files (name -> text) into
+        the request's folder beside it. Waits while the bridge reports progress, gives up after `stall` seconds
+        without a record. The answer carries "mail", the request's folder, where the command's output files are."""
         async with self._command_lock:
-            holder = await take_script_lock(f"altium-mcp {command}")
+            holder = await take_script_lock(f"altium-mcp {command} (mailbox)")
             if holder is not None:
                 return {"success": False, "error": script_lock.describe(holder)}
             try:
-                return await self._execute_command_locked(command, params)
+                return await self._execute_command_locked(command, params, files or {},
+                                                          stall or STALL_BY_COMMAND.get(command, STALL_SECONDS), ctx)
             finally:
                 script_lock.release()
 
-    async def _execute_command_locked(self, command: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    async def _execute_command_locked(self, command: str, params: Dict[str, Any], files: Dict[str, str],
+                                      stall: float, ctx) -> Dict[str, Any]:
+        mail = mailbox.Mail(EXCHANGE_DIR, command, params, files)
         try:
-            # Clean up any existing response file
-            if RESPONSE_FILE.exists():
-                RESPONSE_FILE.unlink()
-            
-            # The request as UTF-8 with a byte-order mark and its text unescaped: LoadFromFile decodes it, so every
-            # value reaches the script as typed, the ones its line parsers take apart (arrays, TrimJSON) included
-            write_altium_text(REQUEST_FILE, json.dumps({"command": command, **params}, indent=2, ensure_ascii=False))
-            
-            logger.info(f"Wrote request file for command: {command}")
-            
-            # Run the Altium script
-            success = await self.run_altium_script()
-            if not success:
-                return {"success": False, "error": "Failed to run Altium script"}
-            
-            # Wait for the response file
-            logger.info(f"Waiting for response file to appear...")
-            timeout = 120  # seconds
-            start_time = time.time()
-            while not RESPONSE_FILE.exists() and time.time() - start_time < timeout:
-                await asyncio.sleep(0.5)
-            
-            if not RESPONSE_FILE.exists():
-                logger.error("Timeout waiting for response from Altium")
-                return {"success": False, "error": "No response received from Altium (timeout)"}
-            
-            # Read the response file and print it for debugging
-            logger.info("Response file found, reading response")
-            response_text = read_altium_text(RESPONSE_FILE)
-            
-            # Log the raw response for debugging
-            logger.info(f"Raw response (first 200 chars): {response_text[:200]}")
-            
-            # Parse the JSON response with detailed error handling
-            try:
-                response = json.loads(response_text)
-                logger.info(f"Successfully parsed JSON response")
-                return response
-            except json.JSONDecodeError as e:
-                logger.error(f"Error parsing JSON response: {e}")
-                logger.error(f"Error at position {e.pos}, line {e.lineno}, column {e.colno}")
-                logger.error(f"Character at error position: '{response_text[e.pos:e.pos+10]}...'")
-                
-                # Try to manually fix common JSON issues
-                logger.info("Attempting to fix JSON response...")
-                fixed_text = response_text
-                
-                # Fix 1: If there's a quoted JSON array, try to fix it
-                if '"[' in fixed_text and ']"' in fixed_text:
-                    fixed_text = fixed_text.replace('"[', '[').replace(']"', ']')
-                    logger.info("Fixed double-quoted JSON array")
-                
-                # Fix 2: Handle escaped quotes in JSON strings
-                fixed_text = fixed_text.replace('\\"', '"')
-                
-                # Try to parse the fixed JSON
+            # under the lock, a queued request of anyone else was left by a server that gave up or died
+            expired = mailbox.expire_others(EXCHANGE_DIR, mail.id)
+            if expired:
+                logger.warning(f"expired requests left in the queue: {expired}")
+            mailbox.prune(EXCHANGE_DIR)
+            mail.post()
+        except OSError as e:
+            return {"success": False, "error": f"could not write the request to {mail.folder}: {e}"}
+        logger.info(f"Queued {command} as {mail.id}")
+        status = {"id": mail.id, "pid": os.getpid(), "command": command, "state": "queued", "since": time.time(),
+                  "stall_seconds": stall, "folder": str(mail.folder)}
+        mailbox.write_status(EXCHANGE_DIR, status)
+        before = {h for h, _, _ in x2_windows(DIALOG_CLASSES)}
+
+        if not await self.run_altium_script():
+            mail.withdraw()
+            status.update(state="failed", error="the bridge script could not be started")
+            mailbox.write_status(EXCHANGE_DIR, status)
+            return {"success": False, "error": "Failed to run Altium script"}
+
+        async def on_progress(record, records):
+            status.update(state="running", last_progress=time.time(), step=record["step"], count=record["count"],
+                          total=record["total"], elapsed_ms=record["elapsed_ms"], records=record["seq"])
+            mailbox.write_status(EXCHANGE_DIR, status)
+            if ctx is not None and record["total"]:
                 try:
-                    fixed_response = json.loads(fixed_text)
-                    logger.info("Successfully parsed fixed JSON response")
-                    return fixed_response
-                except json.JSONDecodeError as e2:
-                    logger.error(f"Still failed to parse JSON after fixes: {e2}")
-                
-                # If all else fails, return a structured error
-                return {
-                    "success": False, 
-                    "error": f"Invalid JSON response: {e}",
-                    "raw_response": response_text[:500]  # Include part of the raw response for diagnosis
-                }
-        
-        except Exception as e:
-            logger.error(f"Error executing command: {e}")
-            return {"success": False, "error": str(e)}
-    
+                    await ctx.report_progress(record["count"], record["total"])
+                except Exception:          # no client request behind this call (dev/call_tool.py), or no token
+                    pass
+
+        closed, refused, sightings = [], [], {}
+
+        async def picture_and_close(h, cls, title, name):
+            shot = mail.file(name)
+            try:
+                await asyncio.wait_for(asyncio.to_thread(lambda: grab_window(h).save(shot)), timeout=10)
+            except Exception:
+                shot = None
+            ctypes_user32().PostMessageW(h, 0x0010, 0, 0)        # WM_CLOSE
+            return f'{cls} "{title}"' + (f" (picture: {shot})" if shot else "")
+
+        async def watch():
+            """A box Altium shows during this call. Before the bridge took the request it cannot come from our
+            script: Altium refuses a RunScript while another script is still finishing ("Another script executing
+            now", a box of its own, 2026-10-23), so the box is closed and the RunScript sent again, the request
+            still queued. After the take it holds our script: seen twice (2 s apart), it is pictured into the
+            request's folder and closed, the way the runner does; True when one was."""
+            acted = False
+            taken = mail.taken()
+            for h, cls, title in x2_windows(DIALOG_CLASSES):
+                if h in before:
+                    continue
+                sightings[h] = sightings.get(h, 0) + 1
+                if not taken and sightings[h] == 1 and len(refused) < RUNSCRIPT_RETRIES:
+                    refused.append(await picture_and_close(h, cls, title, f"refused_{len(refused) + 1}.png"))
+                    logger.warning(f"Altium refused the RunScript for {command} ({refused[-1]}); sending it again")
+                    await asyncio.sleep(1)
+                    await self.run_altium_script()
+                elif taken and sightings[h] == 2:
+                    closed.append(await picture_and_close(h, cls, title, f"dialog_{len(closed) + 1}.png"))
+                    logger.warning(f"closed an Altium box during {command}: {closed[-1]}")
+                    acted = True
+            return acted
+
+        state, detail = await mailbox.wait(mail, stall, on_progress, watch=watch, watch_every=1.0)
+        if state == "stalled":
+            withdrawn = mail.withdraw()
+            response = {"success": False, "request_id": mail.id, "mail": str(mail.folder),
+                        "error": self._stall_error(mail, detail, withdrawn, before, closed, refused)}
+            status.update(state="stalled", error=response["error"])
+            mailbox.write_status(EXCHANGE_DIR, status)
+            logger.error(response["error"])
+            return response
+
+        response = parse_response(detail)
+        if isinstance(response, dict) and response.get("request_id", mail.id) != mail.id:
+            response = {"success": False, "error": f"the answer in {mail.folder} is to request "
+                                                   f"{response.get('request_id')}, not {mail.id}"}
+        status.update(state="answered", answered=time.time())
+        mailbox.write_status(EXCHANGE_DIR, status)
+        response["mail"] = str(mail.folder)
+        if closed:
+            response["altium_boxes_closed"] = closed
+        if refused:
+            response["runscript_refused"] = refused
+        await asyncio.sleep(ANSWER_SETTLE)
+        return response
+
+    def _stall_error(self, mail, detail, withdrawn, before, closed, refused) -> str:
+        """Why the bridge went quiet, as far as can be seen from here: Altium hung, a box it shows (captured into
+        the request's folder and closed when it appeared during this call, the way the runner does), or a
+        script of a caller that gave up still running."""
+        seconds = detail["seconds"]
+        if withdrawn:
+            text = (f"the bridge did not take the request within {seconds:g} s, so it was withdrawn and nothing "
+                    f"ran")
+        else:
+            last = detail["last_record"]
+            where = (f"after '{last['step']}' ({last['count']} of {last['total']}, {last['elapsed_ms'] / 1000:.0f} s "
+                     f"into the run)" if last else "after taking it")
+            text = (f"the bridge took the request and reported no progress for {seconds:g} s {where}; Altium may "
+                    f"still be working on it, and the lock is released")
+        causes = [f"Altium showed {box} during this call, closed" for box in closed]
+        causes += [f"Altium refused the RunScript ({box}) and it was sent again" for box in refused]
+        hung = [title for h, cls, title in x2_windows(None) if ctypes_user32().IsHungAppWindow(h)]
+        if hung:
+            causes.append("Windows reports Altium not responding (" + "; ".join(hung[:3]) + ")")
+        for i, (h, cls, title) in enumerate(x2_windows(DIALOG_CLASSES)):
+            shot = mail.file(f"dialog_{i + 1}.png")
+            try:
+                grab_window(h).save(shot)
+            except Exception:
+                shot = None
+            if h in before:
+                causes.append(f'a box open before this call: {cls} "{title}"' + (f" ({shot})" if shot else ""))
+            else:
+                ctypes_user32().PostMessageW(h, 0x0010, 0, 0)        # WM_CLOSE
+                causes.append(f'Altium showed {cls} "{title}" during this call; its picture is {shot}; closed')
+        if not causes and withdrawn:
+            causes.append("no box and not hung: a script of a caller that gave up may still run, or the RunScript "
+                          "was lost")
+        return text + (". " + "; ".join(causes) if causes else "") + f". Request folder: {mail.folder}"
+
     @staticmethod
     def _resolve_msix_path(virtual_path: str) -> str:
         """Resolve an MSIX-virtualized path to the real filesystem path.
@@ -468,6 +534,80 @@ class AltiumBridge:
         except Exception as e:
             logger.error(f"Error launching Altium: {e}")
             return False
+
+def parse_response(response_text: str):
+    """The bridge's answer as a dict; a malformed one is repaired where it can be, else reported."""
+    logger.info(f"Raw response (first 200 chars): {response_text[:200]}")
+    try:
+        return json.loads(response_text)
+    except json.JSONDecodeError as e:
+        logger.error(f"Error parsing JSON response: {e}")
+        fixed_text = response_text
+        if '"[' in fixed_text and ']"' in fixed_text:          # a quoted JSON array
+            fixed_text = fixed_text.replace('"[', '[').replace(']"', ']')
+        fixed_text = fixed_text.replace('\\"', '"')             # escaped quotes in strings
+        try:
+            return json.loads(fixed_text)
+        except json.JSONDecodeError:
+            return {"success": False, "error": f"Invalid JSON response: {e}", "raw_response": response_text[:500]}
+
+
+def ctypes_user32():
+    import ctypes
+    return ctypes.windll.user32
+
+
+def x2_windows(classes=DIALOG_CLASSES):
+    """Visible top-level windows of X2.EXE, topmost first: [(hwnd, class, title)]; only those of the given
+    window classes, or all with classes None."""
+    found = []
+
+    def cb(hwnd, _):
+        if win32gui.IsWindowVisible(hwnd):
+            cls = win32gui.GetClassName(hwnd)
+            if (classes is None or cls in classes) and _window_process_name(hwnd).lower() == "x2.exe":
+                found.append((hwnd, cls, win32gui.GetWindowText(hwnd)))
+        return True
+
+    try:
+        win32gui.EnumWindows(cb, 0)
+    except Exception:
+        pass
+    return found
+
+
+def grab_window(hwnd) -> Image.Image:
+    """A window rendered through the compositor (PrintWindow with PW_RENDERFULLCONTENT), measured in physical
+    pixels: Altium is DPI-aware, and a DPI-unaware caller gets a scaled rectangle that crops the capture."""
+    import ctypes
+    user32 = ctypes.windll.user32
+    user32.SetThreadDpiAwarenessContext.restype = ctypes.c_void_p
+    previous_dpi = user32.SetThreadDpiAwarenessContext(ctypes.c_void_p(-4))   # per monitor v2
+    try:
+        left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+        width, height = right - left, bottom - top
+        if width <= 0 or height <= 0:
+            raise OSError(f"the window has no size ({width}x{height})")
+        hwnd_dc = win32gui.GetWindowDC(hwnd)
+        mfc_dc = win32ui.CreateDCFromHandle(hwnd_dc)
+        save_dc = mfc_dc.CreateCompatibleDC()
+        bitmap = win32ui.CreateBitmap()
+        bitmap.CreateCompatibleBitmap(mfc_dc, width, height)
+        save_dc.SelectObject(bitmap)
+        try:
+            if not user32.PrintWindow(hwnd, save_dc.GetSafeHdc(), PW_RENDERFULLCONTENT):
+                raise OSError("PrintWindow could not render the window")
+            info = bitmap.GetInfo()
+            return Image.frombuffer("RGB", (info["bmWidth"], info["bmHeight"]), bitmap.GetBitmapBits(True),
+                                    "raw", "BGRX", 0, 1)
+        finally:
+            win32gui.DeleteObject(bitmap.GetHandle())
+            save_dc.DeleteDC()
+            mfc_dc.DeleteDC()
+            win32gui.ReleaseDC(hwnd, hwnd_dc)
+    finally:
+        user32.SetThreadDpiAwarenessContext(ctypes.c_void_p(previous_dpi))
+
 
 async def take_script_lock(owner: str, wait: float = 60):
     """Wait up to `wait` seconds for Altium's one-script lock (script_lock.py): None when taken, else the holder."""
@@ -1641,12 +1781,9 @@ async def build_schematic(ctx: Context, parts: list, wires: list = None,
     except ValueError as e:
         return json.dumps({"success": False, "error": str(e)})
 
-    spec_path = Path("C:/Users/Public/altium_mcp/circuit_spec.txt")
-    spec_path.parent.mkdir(parents=True, exist_ok=True)
-    # Part descriptions carry characters that are not plain ASCII
-    write_altium_text(spec_path, "\n".join(lines) + "\n")
-
-    response = await altium_bridge.execute_command("build_circuit", {})
+    # Part descriptions carry characters that are not plain ASCII: the spec goes as UTF-8 with a byte-order mark
+    response = await altium_bridge.execute_command("build_circuit", {},
+                                                   files={"circuit_spec.txt": "\n".join(lines) + "\n"}, ctx=ctx)
     if not response.get("success", False):
         return json.dumps({"success": False,
                            "error": response.get("error", "unknown error")})
@@ -1660,8 +1797,8 @@ async def build_schematic(ctx: Context, parts: list, wires: list = None,
 
     # Hand back the measured pin map so the caller can route a second pass
     pin_map = {}
-    pm = Path("C:/Users/Public/altium_mcp/pin_map.txt")
-    if pm.is_file():
+    pm = Path(response.get("mail", "")) / "pin_map.txt"
+    if response.get("mail") and pm.is_file():
         for line in read_altium_text(pm).splitlines():
             f = line.strip().split("|")
             if len(f) == 5 and f[0] == "PIN":
@@ -2319,314 +2456,105 @@ async def check_placement(ctx: Context, cmp_designators: list = None, clearance_
     return json.dumps(result, indent=2)
 
 PW_RENDERFULLCONTENT = 2      # PrintWindow: render through DWM, DirectX content included (Windows 8.1+)
+# What view_type="dialog" grabs: Altium's boxes and its Delphi dialog forms (the ECO, the DRC), never the main frame
+DIALOG_GRAB_CLASSES = DIALOG_CLASSES
+ALTIUM_FRAMES = ("TApplication", "TDocumentForm")      # its main and document windows, live 2026-10-23
 
 
-def canvas_colours(img, most=16) -> int:
-    """Distinct colours in the middle 40 % of a window capture (up to most + 1): a painted PCB or schematic view
-    has many, an unpainted canvas one or two."""
-    w, h = img.size
-    colours = img.crop((int(w * 0.3), int(h * 0.3), int(w * 0.7), int(h * 0.7))).getcolors(maxcolors=most)
-    return most + 1 if colours is None else len(colours)
+def _dialog_windows():
+    """Altium's dialogs, topmost first: its boxes, its WPF windows (Sign In) and its Delphi dialog forms."""
+    return [(h, c, t) for h, c, t in x2_windows(None)
+            if c in DIALOG_GRAB_CLASSES or c.startswith("HwndWrapper[")
+            or (c.startswith("T") and c.endswith("Form") and c not in ALTIUM_FRAMES and "Altium Designer" not in t)]
+
+
+def _image_result(meta: dict, img: Image.Image):
+    previous = screenshot.compare_with_last(EXCHANGE_DIR, img, {"kind": meta.get("view_type"),
+                                                                "document": meta.get("document"),
+                                                                "title": meta.get("window_title")})
+    if previous is not None:
+        meta["success"] = False
+        meta["identical_to_previous"] = True
+        meta["error"] = screenshot.identical_error(previous)
+    meta.update(width=img.size[0], height=img.size[1])
+    return [json.dumps(meta, ensure_ascii=False), MCPImage(data=screenshot.png(img), format="png")]
 
 
 @mcp.tool()
-async def get_screenshot(ctx: Context, view_type: str = "pcb", zoom_to: list = None):
+async def get_screenshot(ctx: Context, view_type: str = "pcb", zoom_to: list = None, document: str = "",
+                         width: int = 1600):
     """
-    Take a screenshot of the Altium window, returned as viewable image content.
+    Picture of a PCB or schematic document, printed by Altium itself, or of an Altium dialog.
+
+    A board or sheet is printed through Altium's own PCB Print or Schematic Print, published to PDF and
+    rasterised: it shows the document's state in memory (unsaved changes included), whatever Altium's window
+    shows. Altium's window held another document's pixels while naming the requested one (2026-10-23), so the
+    window is grabbed only for a dialog. A picture identical to the previous capture (any server, any kind) is
+    returned with success false and says so: nothing changed, or the capture missed the change.
 
     Args:
-        view_type (str): Type of view to capture - 'pcb' or 'sch'
-        zoom_to (list, optional): List of component designators (e.g. ["U12", "R42"]).
-            PCB view only: Altium zooms to the bounding box of these components
-            (plus a margin) before the capture, so the components fill the frame.
-            Omit to capture at the current zoom level.
+        view_type (str): 'pcb', 'sch' or 'dialog' (the topmost Altium dialog or box, grabbed from its window)
+        zoom_to (list, optional): PCB only: component designators (e.g. ["U12", "R42"]); the print covers
+            their bounding box plus a margin instead of the whole board
+        document (str, optional): full path of the .PcbDoc or .SchDoc to print (its project must be open);
+            default the focused document of the view_type
+        width (int): pixels on the picture's longer side (default 1600, at most 4000)
 
     Returns:
-        Image content of the captured window plus a JSON metadata text block
-        (window title, size, zoomed component count)
+        A JSON text block (document, project, the printed layers, zoomed and missing designators, the PDF's
+        path) and the image
     """
-    logger.info(f"Taking screenshot of Altium {view_type} window (zoom_to={zoom_to})")
+    view = (view_type or "").lower()
+    logger.info(f"get_screenshot view={view} zoom_to={zoom_to} document={document!r}")
+    if view == "dialog":
+        windows = _dialog_windows()
+        if not windows:
+            return json.dumps({"success": False, "error": "Altium shows no dialog"})
+        hwnd, cls, title = windows[0]
+        try:
+            img = await asyncio.wait_for(asyncio.to_thread(grab_window, hwnd), timeout=10)
+        except Exception as e:
+            return json.dumps({"success": False, "error": f"could not grab the dialog {cls} \"{title}\": {e}"})
+        meta = {"success": True, "view_type": "dialog", "window_title": title, "window_class": cls,
+                "other_dialogs": [f'{c} "{t}"' for _, c, t in windows[1:]]}
+        return _image_result(meta, img)
+    if view not in ("pcb", "sch"):
+        return json.dumps({"success": False, "error": f"view_type is 'pcb', 'sch' or 'dialog', not {view_type!r}"})
+    if document and (not Path(document).is_absolute() or Path(document).suffix.lower() not in (".pcbdoc", ".schdoc")):
+        return json.dumps({"success": False, "error": f"document must be the full path of a .PcbDoc or .SchDoc: "
+                                                      f"{document}"})
+    if zoom_to and view != "pcb":
+        return json.dumps({"success": False, "error": "zoom_to applies to a PCB print only"})
 
+    params = {"view_type": view}
+    if document:
+        params["document"] = str(Path(document))
+    if zoom_to:
+        params["designators"] = list(zoom_to)
+    files = {screenshot.TEMPLATE: screenshot.outjob(view).encode("ascii")}   # the bridge keeps its code page
+    response = await altium_bridge.execute_command("take_view_screenshot", params, files=files, ctx=ctx)
+    if not response.get("success", False):
+        return json.dumps({"success": False, "error": f"Altium did not print the {view} document: "
+                                                      f"{response.get('error', 'unknown error')}"})
+    meta = response.get("result", {})
+    meta = meta if isinstance(meta, dict) else {}
+    pdf = Path(meta.get("pdf") or Path(response.get("mail", "")) / screenshot.PDF)
     try:
-        # First, execute the Altium command to ensure the right document type
-        # is focused, optionally zooming to the requested components
-        params = {"view_type": view_type.lower()}
-        if zoom_to:
-            params["designators"] = zoom_to
-        response = await altium_bridge.execute_command(
-            "take_view_screenshot",
-            params
-        )
-        
-        # Check for success
-        if not response.get("success", False):
-            error_msg = response.get("error", "Unknown error")
-            logger.error(f"Error focusing {view_type} document: {error_msg}")
-            return json.dumps({"success": False, "error": f"Failed to focus the correct document type: {error_msg}"})
-
-        # Altium reports which document ended up focused. If it is not the
-        # kind that was asked for (typically: no document of that kind is
-        # open), say so instead of returning the wrong editor labelled as
-        # the requested view.
-        focus_info = response.get("result", {})
-        focus_info = focus_info if isinstance(focus_info, dict) else {}
-        focused_kind = str(focus_info.get("focused_kind", "") or "").upper()
-        focused_document = focus_info.get("focused_document", "")
-        wanted_kind = {"pcb": "PCB", "sch": "SCH"}.get(view_type.lower())
-        if wanted_kind and focused_kind and focused_kind != wanted_kind:
-            logger.error(f"Requested {view_type} view but {focused_kind} document is focused")
-            return json.dumps({
-                "success": False,
-                "error": f"Requested a '{view_type}' view but Altium has a {focused_kind} "
-                         f"document focused ({focused_document}). Is a "
-                         f"{wanted_kind} document open in the active project?",
-                "requested_view_type": view_type,
-                "focused_kind": focused_kind,
-                "focused_document": focused_document})
-
-        # Run the screenshot capture in a separate thread
-        import threading
-        import queue
-        import datetime
-        from PIL import Image
-        
-        result_queue = queue.Queue()
-        
-        def capture_screenshot_thread():
-            try:
-                # Find Altium windows
-                altium_windows = []
-                altium_fallback_windows = []
-                
-                def collect_altium_windows(hwnd, _):
-                    if win32gui.IsWindowVisible(hwnd):
-                        title = win32gui.GetWindowText(hwnd)
-                        
-                        # First, look for windows with Altium and .PrjPcb in the title
-                        if "Altium" in title and ".PrjPcb" in title:
-                            altium_windows.append({
-                                "handle": hwnd,
-                                "title": title,
-                                "class_name": win32gui.GetClassName(hwnd),
-                                "rect": win32gui.GetWindowRect(hwnd)
-                            })
-                        # Collect any window with Altium in the title as fallback
-                        elif "Altium" in title:
-                            altium_fallback_windows.append({
-                                "handle": hwnd,
-                                "title": title,
-                                "class_name": win32gui.GetClassName(hwnd),
-                                "rect": win32gui.GetWindowRect(hwnd)
-                            })
-                    return True
-                
-                win32gui.EnumWindows(collect_altium_windows, 0)
-                
-                # If no specific Altium .PrjPcb windows found, use the fallback
-                if not altium_windows and altium_fallback_windows:
-                    altium_windows = altium_fallback_windows
-                
-                if not altium_windows:
-                    result_queue.put({
-                        "success": False, 
-                        "error": f"No Altium windows found for {view_type} view"
-                    })
-                    return
-                
-                # Altium owns several top-level windows with its name in the
-                # title, and while it switches documents a small transient one
-                # can come first. Take the largest window that is not
-                # minimized: that is the main frame.
-                def area(w):
-                    l, t, r, b = w["rect"]
-                    return max(0, r - l) * max(0, b - t)
-                candidates = [w for w in altium_windows if not win32gui.IsIconic(w["handle"])]
-                window = max(candidates or altium_windows, key=area)
-                hwnd = window["handle"]
-                
-                # Bring Altium to the front and let it paint. Altium only
-                # renders a schematic view once it has actually been shown on
-                # screen, so a capture taken while it sits behind another
-                # window comes back with a blank canvas. Windows may refuse
-                # SetForegroundWindow from a process that neither is nor was
-                # started by the foreground process; a synthetic Alt press
-                # before the call is the standard unlock and is harmless.
-                activated = False
-                altium_pid = win32process.GetWindowThreadProcessId(hwnd)[1]
-
-                def altium_is_foreground():
-                    # Altium owns several top-level windows; any of them
-                    # being foreground means Altium is in front.
-                    fg = win32gui.GetForegroundWindow()
-                    return bool(fg) and win32process.GetWindowThreadProcessId(fg)[1] == altium_pid
-
-                try:
-                    for attempt in range(2):
-                        if attempt:
-                            import ctypes
-                            ctypes.windll.user32.keybd_event(0x12, 0, 0, 0)
-                            ctypes.windll.user32.keybd_event(0x12, 0, 2, 0)
-                        try:
-                            win32gui.SetForegroundWindow(hwnd)
-                        except Exception:
-                            pass
-                        deadline = time.time() + 1.5
-                        while time.time() < deadline:
-                            time.sleep(0.1)
-                            if altium_is_foreground():
-                                activated = True
-                                break
-                        if activated:
-                            break
-                except Exception as e:
-                    logger.warning(f"Could not bring window to foreground: {e}")
-                if not activated:
-                    logger.warning("Altium is not the foreground window; the capture may show an unpainted view")
-                # A freshly switched-to document needs a moment to render.
-                time.sleep(1.0)
-
-                # Measure AFTER activation (restoring or switching can change the
-                # frame's size), in physical pixels: Altium is DPI-aware, and a
-                # DPI-unaware caller gets a scaled rectangle that crops the capture
-                import ctypes
-                user32 = ctypes.windll.user32
-                user32.SetThreadDpiAwarenessContext.restype = ctypes.c_void_p
-                previous_dpi = user32.SetThreadDpiAwarenessContext(ctypes.c_void_p(-4))   # per monitor v2
-                left, top, right, bottom = win32gui.GetWindowRect(hwnd)
-                width = right - left
-                height = bottom - top
-                if width < 200 or height < 150:
-                    user32.SetThreadDpiAwarenessContext(ctypes.c_void_p(previous_dpi))
-                    result_queue.put({"success": False, "error": f"Altium window is too small to capture ({width}x{height}); is it minimized?"})
-                    return
-
-                # The window rendered through the compositor: PrintWindow with
-                # PW_RENDERFULLCONTENT includes what Altium presents with DirectX
-                # (the PCB canvas), which BitBlt from the window DC never holds
-                try:
-                    hwndDC = win32gui.GetWindowDC(hwnd)
-                    mfcDC = win32ui.CreateDCFromHandle(hwndDC)
-                    saveDC = mfcDC.CreateCompatibleDC()
-                    saveBitMap = win32ui.CreateBitmap()
-                    saveBitMap.CreateCompatibleBitmap(mfcDC, width, height)
-                    saveDC.SelectObject(saveBitMap)
-                    rendered = user32.PrintWindow(hwnd, saveDC.GetSafeHdc(), PW_RENDERFULLCONTENT)
-                    user32.SetThreadDpiAwarenessContext(ctypes.c_void_p(previous_dpi))
-                    if not rendered:
-                        raise OSError("PrintWindow could not render the Altium window")
-                    bmpinfo = saveBitMap.GetInfo()
-                    bmpstr = saveBitMap.GetBitmapBits(True)
-                    img = Image.frombuffer(
-                        'RGB',
-                        (bmpinfo['bmWidth'], bmpinfo['bmHeight']),
-                        bmpstr, 'raw', 'BGRX', 0, 1)
-
-                    # Save a local copy of the screenshot for debugging (non-fatal if it fails)
-                    try:
-                        debug_filename = str(MCP_DIR / f"screenshot_{view_type}.png")
-                        img.save(debug_filename)
-                        logger.info(f"Saved debug screenshot to {debug_filename}")
-                    except Exception as save_error:
-                        logger.warning(f"Could not save debug screenshot to {debug_filename}: {save_error}")
-                        debug_filename = None  # Clear it since save failed
-                    
-                    # Clean up GDI resources
-                    win32gui.DeleteObject(saveBitMap.GetHandle())
-                    saveDC.DeleteDC()
-                    mfcDC.DeleteDC()
-                    win32gui.ReleaseDC(hwnd, hwndDC)
-                    
-                    # Convert to base64
-                    buffer = io.BytesIO()
-                    img.save(buffer, format='PNG')
-                    buffer.seek(0)
-                    img_base64 = base64.b64encode(buffer.read()).decode('utf-8')
-                    
-                    # Put result in queue
-                    result_queue.put({
-                        "success": True,
-                        "width": width,
-                        "height": height,
-                        "window_title": window["title"],
-                        "window_class": window["class_name"],
-                        "view_type": view_type,
-                        "foreground_confirmed": activated,
-                        "canvas_colours": canvas_colours(img),
-                        "image_format": "PNG",
-                        "encoding": "base64",
-                        "debug_file": debug_filename,
-                        "image_data": img_base64
-                    })
-                    
-                except Exception as e:
-                    import traceback
-                    trace = traceback.format_exc()
-                    logger.error(f"GDI screenshot error: {e}\n{trace}")
-                    result_queue.put({
-                        "success": False, 
-                        "error": f"GDI screenshot failed: {str(e)}",
-                        "traceback": trace
-                    })
-                
-            except Exception as e:
-                import traceback
-                result_queue.put({
-                    "success": False, 
-                    "error": f"Screenshot thread error: {str(e)}",
-                    "traceback": traceback.format_exc()
-                })
-        
-        # Start the thread
-        thread = threading.Thread(target=capture_screenshot_thread)
-        thread.daemon = True
-        thread.start()
-        
-        # Wait for the thread to complete
-        thread.join(timeout=10)  # 10 second timeout
-        
-        if thread.is_alive():
-            logger.error("Screenshot thread timed out")
-            return json.dumps({"success": False, "error": "Screenshot operation timed out"})
-        
-        # Get the result from the queue
-        if result_queue.empty():
-            logger.error("Screenshot thread did not return a result")
-            return json.dumps({"success": False, "error": "Screenshot thread did not return a result"})
-        
-        result = result_queue.get()
-
-        if not result.get("success", False):
-            error_msg = result.get("error", "Unknown error")
-            logger.error(f"Screenshot error: {error_msg}")
-            return json.dumps({"success": False, "error": error_msg})
-
-        logger.info(f"Screenshot taken successfully, size: {result['width']}x{result['height']}")
-
-        # Return the PNG as a proper MCP image content block instead of inline
-        # base64 text: raw base64 in the text result exceeds client token
-        # limits (a full-window capture is ~300 KB), while image blocks are
-        # rendered natively by clients
-        image_base64 = result.pop("image_data")
-        result.pop("encoding", None)
-        zoom_info = response.get("result", {})
-        if isinstance(zoom_info, dict) and "zoomed_component_count" in zoom_info:
-            result["zoomed_component_count"] = zoom_info["zoomed_component_count"]
-        # What was actually captured, as opposed to what was requested
-        result["captured_kind"] = focused_kind or None
-        result["captured_document"] = focused_document or None
-        if result["canvas_colours"] <= 2:
-            result["success"] = False
-            result["error"] = ("the canvas in the middle of the window is one colour: Altium has not painted the view "
-                               "(not shown on screen, or a view this capture cannot reach); the image is attached")
-        return [
-            json.dumps(result),
-            MCPImage(data=base64.b64decode(image_base64), format="png"),
-        ]
-
+        img = await asyncio.to_thread(screenshot.render_pdf, pdf, width)
+    except ImportError:
+        return json.dumps({"success": False, "error": "rasterising the print needs pypdfium2 in the server's "
+                                                      "environment (pip install pypdfium2)", "pdf": str(pdf)})
     except Exception as e:
-        logger.error(f"Error in screenshot function: {str(e)}")
-        return json.dumps({"success": False, "error": f"Failed to take screenshot: {str(e)}"})
-    
+        return json.dumps({"success": False, "error": f"could not rasterise {pdf}: {e}"})
+    meta["success"] = True
+    meta["missing_designators"] = [d for d in str(meta.get("missing_designators", "")).split(",") if d]
+    meta["layers"] = [d for d in str(meta.get("layers", "")).split(",") if d]
+    if screenshot.colours(img) <= 2:
+        meta["success"] = False
+        meta["error"] = "the print is blank (one colour): nothing of the document lies in the printed area"
+    return _image_result(meta, img)
+
+
 @mcp.tool()
 async def layout_duplicator(ctx: Context) -> str:
     """
@@ -2909,14 +2837,13 @@ async def get_erc_violations(ctx: Context, compile: bool = True) -> str:
     return await _simple_command("get_erc_violations", {"compile": compile}, "ERC violations")
 
 
-EDIT_SPEC_FILE = EXCHANGE_DIR / "edit_spec.txt"
-ANNOTATE_SPEC_FILE = EXCHANGE_DIR / "annotate_spec.txt"
+EDIT_SPEC_FILE = "edit_spec.txt"             # in the request's folder (mailbox.py)
+ANNOTATE_SPEC_FILE = "annotate_spec.txt"
 
 
-async def _bridge_spec(command: str, spec_file: Path, lines: list) -> dict:
-    """Write a spec for the bridge and run the command that reads it; the bridge's JSON as a dict."""
-    write_altium_text(spec_file, "\n".join(lines) + "\n")
-    response = await altium_bridge.execute_command(command, {})
+async def _bridge_spec(command: str, spec_file: str, lines: list, ctx: Context = None) -> dict:
+    """Run a command with its spec in the request's folder; the bridge's JSON as a dict."""
+    response = await altium_bridge.execute_command(command, {}, files={spec_file: "\n".join(lines) + "\n"}, ctx=ctx)
     if not response.get("success", False):
         return {"success": False, "error": response.get("error", "unknown error")}
     result = response.get("result", {})
@@ -2928,11 +2855,11 @@ async def _bridge_spec(command: str, spec_file: Path, lines: list) -> dict:
     return result
 
 
-async def _spec_command(command: str, spec_file: Path, lines: list) -> str:
+async def _spec_command(command: str, spec_file: str, lines: list) -> str:
     return json.dumps(await _bridge_spec(command, spec_file, lines), indent=2, ensure_ascii=False)
 
 
-async def _edit_command(sheet: str, ops: list, power_nets: list, save: bool) -> str:
+async def _edit_command(sheet: str, ops: list, power_nets: list, save: bool, ctx: Context = None) -> str:
     """edit_schematic in two passes when it connects pins or draws: the ops run and Altium reports the pins to
     connect and the sheet (pass 1, nothing saved), sheet_plan resolves the wire, junction and port ops and places
     each connection where it touches nothing, pass 2 draws it all and saves."""
@@ -2945,12 +2872,12 @@ async def _edit_command(sheet: str, ops: list, power_nets: list, save: bool) -> 
     power = schematic_edit.power_table(list(power_nets or []) + [d["net"] for d in draws if d["op"] == "port"])
     connects = bool(draws) or any(line.split("|", 1)[0] in schematic_edit.CONNECTIONS for line in lines)
     first = await _bridge_spec("edit_schematic", EDIT_SPEC_FILE,
-                               lines + (["GEOMETRY"] if connects else ["SAVE"] if save else []))
+                               lines + (["GEOMETRY"] if connects else ["SAVE"] if save else []), ctx)
     geometry, pending = first.pop("geometry", None), first.pop("pending", [])
     errors = first.setdefault("errors", [])
     if connects and geometry is not None:
         objects = sheet_plan.plan(geometry, pending, power, draws)
-        second = await _bridge_spec("edit_schematic", EDIT_SPEC_FILE, sheet_plan.draw_spec(path, objects, save))
+        second = await _bridge_spec("edit_schematic", EDIT_SPEC_FILE, sheet_plan.draw_spec(path, objects, save), ctx)
         first["saved"] = second.get("saved", "")
         errors += objects["errors"] + second.get("errors", [])
         if "error" in second:
@@ -3046,7 +2973,7 @@ async def edit_schematic(ctx: Context, sheet: str, ops: list, power_nets: list =
              overlaps [..]. A part linked to an IntLib or DbLib takes every model from that library ("Use Component
              Library", as a hand-placed part does); one that does not is an error.
     """
-    return await _edit_command(sheet, ops, power_nets, save)
+    return await _edit_command(sheet, ops, power_nets, save, ctx)
 
 
 @mcp.tool()
@@ -3083,7 +3010,7 @@ async def replace_component(ctx: Context, sheet: str, comp: str, symbol_library:
               mirror=mirror)
     if orient is not None:
         op["orient"] = orient
-    return await _edit_command(sheet, [op], power_nets, save)
+    return await _edit_command(sheet, [op], power_nets, save, ctx)
 
 
 @mcp.tool()

@@ -2,9 +2,18 @@ const
     DEFAULT = 'Blank';
     SCRIPT_ERROR_LOG = 'C:\Users\Public\altium_mcp\script_errors.log';
 
+    // One layer of a PCB Print (PrintView); %L% is the layer's name
+    PRINT_LAYER_RECORD = 'CArc=Full|CFill=Full|Comment=Full|Coordinate=Full|CPad=Full|CRegion=Full|CText=Full|CTrack=Full|CVia=Full|Designator=Full|Dimension=Full|DLayer1=TopLayer|DLayer2=BottomLayer|DrillType=Regular|FArc=Full|FFill=Full|FPad=Full|FRegion=Full|FText=Full|FTrack=Full|FVia=Full|Layer=%L%|Polygon=Full|PrintOutIndex=0|Record=PcbPrintLayer';
+    PROGRESS_KEEP = 400;       // progress records kept in the file; the first ('taken') always stays
+
 var
     // Why the last EnsureDocumentFocused call failed; reported to the server.
     FocusFailure : String;
+    // The running mailbox request's progress (BridgeProgress): '' while a single-file request runs, which has none
+    PROGRESS_FILE : String;
+    ProgressLines : TStringList;
+    ProgressSeq   : Integer;
+    ProgressT0    : Integer;
 
 // Errors must never be modal. The server is driven by an agent with no hands:
 // a ShowMessage box blocks this script before it writes its response, every
@@ -22,6 +31,37 @@ begin
         L.SaveToFile(SCRIPT_ERROR_LOG);
     except
     end;
+end;
+
+// Progress records for the server waiting on this request (server/mailbox.py): one line each,
+// seq|elapsed ms|step|count|total, the file rewritten whole. The server waits while records keep landing and gives
+// up only when none lands for its stall time, so a long batch reports each step. A write that fails while the
+// server is reading the file is skipped; the record goes out with the next one.
+procedure BridgeProgressBegin(Path: String);
+begin
+    PROGRESS_FILE := Path;
+    ProgressLines := TStringList.Create;
+    ProgressSeq := 0;
+    ProgressT0 := GetTickCount;
+end;
+
+procedure BridgeProgress(Step: String; Count: Integer; Total: Integer);
+begin
+    if (PROGRESS_FILE = '') then Exit;
+    ProgressSeq := ProgressSeq + 1;
+    ProgressLines.Add(IntToStr(ProgressSeq) + '|' + IntToStr(GetTickCount - ProgressT0) + '|' +
+                      StringReplace(Step, '|', '/', REPLACEALL) + '|' + IntToStr(Count) + '|' + IntToStr(Total));
+    while (ProgressLines.Count > PROGRESS_KEEP) do ProgressLines.Delete(1);
+    try
+        ProgressLines.SaveToFile(PROGRESS_FILE);
+    except
+    end;
+end;
+
+procedure BridgeProgressEnd;
+begin
+    if (PROGRESS_FILE <> '') then ProgressLines.Free;
+    PROGRESS_FILE := '';
 end;
 
 {..............................................................................}
@@ -453,10 +493,9 @@ begin
     end;
 end;
 
-// Add a screenshot function that supports both PCB and SCH views.
-// If DesignatorsList is non-empty (PCB view only), the view is zoomed to
-// those components before the server captures the window.
-function TakeViewScreenshot(ViewType: String; DesignatorsList: TStringList): String;
+// The window-grab protocol of servers started before the print path: focus the document kind, zoom a PCB view to
+// DesignatorsList, report what is focused; the server then grabs Altium's window.
+function TakeViewFocus(ViewType: String; DesignatorsList: TStringList): String;
 var
     Board          : IPCB_Board;
     SchDoc         : ISch_Document;
@@ -801,6 +840,7 @@ begin
                             if ContainerName = ContainerNames[I] then
                             begin
                                 ContainerFound := True;
+                                BridgeProgress('container ' + ContainerName, I + 1, ContainerNames.Count);
                                 ContainerAction := IniFile.ReadString(S, 'OutputMedium' + IntToStr(J) + '_Type', DEFAULT);
                                 OutJobDoc.Focus;
                                 if ContainerAction = 'GeneratedFiles' then
@@ -1163,4 +1203,300 @@ begin
         CompArray.Free;
         ResultProps.Free;
     end;
+end;
+
+
+// The items of a list joined by commas
+function CommaList(L: TStringList): String;
+var
+    i : Integer;
+begin
+    Result := '';
+    for i := 0 to L.Count - 1 do
+    begin
+        if (i > 0) then Result := Result + ',';
+        Result := Result + L[i];
+    end;
+end;
+
+// The open project that lists a document, or nil
+function DocumentProject(Path: String): IProject;
+var
+    i, j : Integer;
+    Prj  : IProject;
+begin
+    Result := nil;
+    for i := 0 to GetWorkspace.DM_ProjectCount - 1 do
+    begin
+        Prj := GetWorkspace.DM_Projects(i);
+        if (Prj <> nil) then
+            for j := 0 to Prj.DM_LogicalDocumentCount - 1 do
+                if (NormalizedPath(Prj.DM_LogicalDocuments(j).DM_FullPath) = NormalizedPath(Path)) then
+                begin
+                    Result := Prj;
+                    Exit;
+                end;
+    end;
+end;
+
+// The name a PcbPrintLayer record gives a copper layer by its V6 id; the OutJob writes layer names without spaces
+function PrintCopperName(V6: Integer): String;
+begin
+    Result := '';
+    if (V6 = 1) then Result := 'TopLayer'
+    else if (V6 >= 2) and (V6 <= 31) then Result := 'MidLayer' + IntToStr(V6 - 1)
+    else if (V6 = 32) then Result := 'BottomLayer'
+    else if (V6 >= 39) and (V6 <= 54) then Result := 'InternalPlane' + IntToStr(V6 - 38);
+end;
+
+// The print records of the board's displayed layers, top first: Altium prints the first record over the rest (the
+// order flipped which pour covered the other, scratch board 2026-10-23), so the top side is drawn over the bottom
+// as the view does from above, its silk and the mechanical outlines over the copper; Names gets the layer names
+function PrintLayerRecords(Board: IPCB_Board; Names: TStringList): String;
+var
+    LS     : IPCB_LayerStack_V7;
+    LO     : IPCB_LayerObject;
+    ML     : IPCB_MechanicalLayer;
+    i      : Integer;
+begin
+    Names.Clear;
+    LS := Board.LayerStack_V7;
+    if Board.LayerIsDisplayed[eKeepOutLayer] then Names.Add('KeepOutLayer');
+    if Board.LayerIsDisplayed[eTopOverlay] then Names.Add('TopOverlay');
+    for i := 1 to 32 do
+    begin
+        ML := LS.LayerObject_V7[ILayer.MechanicalLayer(i)];
+        if ML.MechanicalLayerEnabled and ML.IsDisplayed[Board] then Names.Add('Mechanical' + IntToStr(i));
+    end;
+    if Board.LayerIsDisplayed[eMultiLayer] then Names.Add('MultiLayer');
+    LO := LS.FirstLayer;
+    while (LO <> nil) do
+    begin
+        if LO.IsDisplayed[Board] and (PrintCopperName(LO.V6_LayerID) <> '') then
+            Names.Add(PrintCopperName(LO.V6_LayerID));
+        LO := LS.NextLayer(LO);
+    end;
+    if Board.LayerIsDisplayed[eBottomOverlay] then Names.Add('BottomOverlay');
+    Result := '';
+    for i := 0 to Names.Count - 1 do
+    begin
+        if (i > 0) then Result := Result + #13#10;
+        Result := Result + 'Configuration1_Name' + IntToStr(i + 3) + '=OutputConfigurationParameter' + IntToStr(i + 3) +
+                  #13#10 + 'Configuration1_Item' + IntToStr(i + 3) + '=' +
+                  StringReplace(PRINT_LAYER_RECORD, '%L%', Names[i], REPLACEALL);
+    end;
+end;
+
+// The print area: the design extent, or the bounding box of the components named in DesignatorsList with a margin
+// of a tenth of the larger span (at least 100 mil), in Altium's internal units as the OutJob takes them. Found gets
+// how many were on the board, Missing the others.
+function PrintArea(Board: IPCB_Board; DesignatorsList: TStringList; Missing: TStringList; var Found: Integer): String;
+var
+    Component  : IPCB_Component;
+    Rect       : TCoordRect;
+    i          : Integer;
+    MinX, MinY, MaxX, MaxY, Margin : Integer;
+begin
+    Found := 0;
+    Result := 'PrintArea=DesignExtent|PrintAreaLowerLeftCornerX=0|PrintAreaLowerLeftCornerY=0|' +
+              'PrintAreaUpperRightCornerX=0|PrintAreaUpperRightCornerY=0';
+    if (DesignatorsList = nil) then Exit;
+    for i := 0 to DesignatorsList.Count - 1 do
+    begin
+        Component := Board.GetPcbComponentByRefDes(Trim(DesignatorsList[i]));
+        if (Component = nil) then
+            Missing.Add(Trim(DesignatorsList[i]))
+        else
+        begin
+            Rect := Component.BoundingRectangleNoNameComment;
+            if (Found = 0) then
+            begin
+                MinX := Rect.Left;
+                MaxX := Rect.Right;
+                MinY := Rect.Bottom;
+                MaxY := Rect.Top;
+            end
+            else
+            begin
+                if Rect.Left < MinX then MinX := Rect.Left;
+                if Rect.Right > MaxX then MaxX := Rect.Right;
+                if Rect.Bottom < MinY then MinY := Rect.Bottom;
+                if Rect.Top > MaxY then MaxY := Rect.Top;
+            end;
+            Found := Found + 1;
+        end;
+    end;
+    if (Found = 0) then Exit;
+    Margin := MaxX - MinX;
+    if (MaxY - MinY) > Margin then Margin := MaxY - MinY;
+    Margin := Margin div 10;
+    if Margin < MilsToCoord(100) then Margin := MilsToCoord(100);
+    Result := 'PrintArea=SpecificArea|PrintAreaLowerLeftCornerX=' + IntToStr(MinX - Margin) +
+              '|PrintAreaLowerLeftCornerY=' + IntToStr(MinY - Margin) +
+              '|PrintAreaUpperRightCornerX=' + IntToStr(MaxX + Margin) +
+              '|PrintAreaUpperRightCornerY=' + IntToStr(MaxY + Margin);
+end;
+
+// Print a PCB or schematic document to ROOT_DIR\shot.pdf. The OutJob resolves its document only inside the
+// document's project (one outside it answers "Missing file", 2026-10-23), so it joins that project for the print:
+// added, published with its dialog off, closed and taken out again, the project's modified flag put back and the
+// document that had the focus focused again. Nothing is saved.
+function PrintView(ViewType: String; DesignatorsList: TStringList; Document: String): String;
+var
+    Kind, Path, Rel, PrjDir, Area, Layers, Text, Focused, JobPath, Pdf : String;
+    Board    : IPCB_Board;
+    SchDoc   : ISch_Document;
+    Prj      : IProject;
+    JobDoc, PrjDoc, FocusDoc, SrvDoc : IServerDocument;
+    Was      : Boolean;
+    L, Names, Missing, Props : TStringList;
+    Found    : Integer;
+begin
+    Path := Trim(Document);
+    if (Path <> '') then
+    begin
+        if (LowerCase(ExtractFileExt(Path)) = '.pcbdoc') then Kind := 'pcb'
+        else if (LowerCase(ExtractFileExt(Path)) = '.schdoc') then Kind := 'sch'
+        else
+        begin
+            Result := 'ERROR: document must be a .PcbDoc or a .SchDoc: ' + Path;
+            Exit;
+        end;
+        SrvDoc := FindOpenDocument(Path);
+        if (SrvDoc = nil) then SrvDoc := Client.OpenDocument(UpperCase(Kind), Path);
+        if (SrvDoc = nil) then
+        begin
+            Result := 'ERROR: cannot open ' + Path;
+            Exit;
+        end;
+    end
+    else
+    begin
+        Kind := ViewType;
+        if (Kind = 'pcb') then
+        begin
+            Board := GetBoardSafe(0);
+            if (Board <> nil) then Path := Board.FileName;
+        end
+        else if (Kind = 'sch') then
+        begin
+            SchDoc := SchServer.GetCurrentSchDocument;
+            if (SchDoc <> nil) then Path := SchDoc.DocumentName;
+        end;
+        if (Path = '') then
+        begin
+            Result := 'ERROR: no ' + UpperCase(Kind) + ' document is focused';
+            Exit;
+        end;
+    end;
+
+    Prj := DocumentProject(Path);
+    if (Prj = nil) then
+    begin
+        Result := 'ERROR: ' + Path + ' is in no open project; its print needs the project (open_project)';
+        Exit;
+    end;
+    PrjDir := ExtractFilePath(Prj.DM_ProjectFullPath);
+    if (PrjDir = '') then
+    begin
+        // a free document: an OutJob resolves no document outside a project, and joining one publishes nothing
+        Result := 'ERROR: ' + Path + ' is a free document (in no project), and Altium prints a document only ' +
+                  'inside its project: add it to one, or open it from its project';
+        Exit;
+    end;
+    Rel := Path;
+    if (Pos(NormalizedPath(PrjDir), NormalizedPath(Path)) = 1) then
+        Rel := Copy(Path, Length(PrjDir) + 1, Length(Path));
+
+    Names := TStringList.Create;
+    Missing := TStringList.Create;
+    Found := 0;
+    Area := '';
+    Layers := '';
+    if (Kind = 'pcb') then
+    begin
+        Board := PCBServer.GetPCBBoardByPath(Path);
+        if (Board = nil) then
+        begin
+            Result := 'ERROR: ' + Path + ' is not open as a board';
+            Exit;
+        end;
+        Area := PrintArea(Board, DesignatorsList, Missing, Found);
+        Layers := PrintLayerRecords(Board, Names);
+    end;
+
+    L := TStringList.Create;
+    L.LoadFromFile(ROOT_DIR + 'shot_template.OutJob');
+    Text := L.Text;
+    Text := StringReplace(Text, '{DIR}', ROOT_DIR, REPLACEALL);
+    Text := StringReplace(Text, '{DOC}', Rel, REPLACEALL);
+    Text := StringReplace(Text, '{AREA}', Area, REPLACEALL);
+    Text := StringReplace(Text, '{LAYERS}', Layers, REPLACEALL);
+    L.Text := Text;
+    JobPath := ROOT_DIR + 'shot.OutJob';
+    L.SaveToFile(JobPath);
+    L.Free;
+    Pdf := ROOT_DIR + 'shot.pdf';
+
+    Focused := '';
+    if (GetWorkspace.DM_FocusedDocument <> nil) then Focused := GetWorkspace.DM_FocusedDocument.DM_FullPath;
+    PrjDoc := nil;
+    Was := False;
+    PrjDoc := Client.GetDocumentByPath(Prj.DM_ProjectFullPath);
+    if (PrjDoc <> nil) then Was := PrjDoc.Modified;
+    Prj.DM_AddSourceDocument(JobPath);
+    BridgeProgress('print ' + Kind, 1, 3);
+    JobDoc := Client.OpenDocument('OUTPUTJOB', JobPath);
+    if (JobDoc <> nil) then
+    begin
+        Client.ShowDocument(JobDoc);
+        BridgeProgress('publish', 2, 3);
+        ResetParameters;
+        AddStringParameter('Action', 'PublishToPDF');
+        AddStringParameter('ObjectKind', 'OutputBatch');
+        AddStringParameter('OutputMedium', 'PDF');
+        AddStringParameter('DisableDialog', 'True');
+        RunProcess('WorkspaceManager:Print');
+        Client.CloseDocument(JobDoc);
+    end;
+    Prj.DM_RemoveSourceDocument(JobPath);
+    if (PrjDoc <> nil) then PrjDoc.Modified := Was;
+    if (Focused <> '') then
+    begin
+        FocusDoc := Client.GetDocumentByPath(Focused);
+        if (FocusDoc <> nil) then Client.ShowDocument(FocusDoc);
+    end;
+    BridgeProgress('printed', 3, 3);
+
+    if (JobDoc = nil) then
+        Result := 'ERROR: Altium did not open the print OutJob ' + JobPath
+    else if not FileExists(Pdf) then
+        Result := 'ERROR: Altium published no PDF of ' + Path
+    else
+    begin
+        Props := TStringList.Create;
+        AddJSONBoolean(Props, 'success', True);
+        AddJSONProperty(Props, 'view_type', Kind);
+        AddJSONProperty(Props, 'document', Path);
+        AddJSONProperty(Props, 'project', Prj.DM_ProjectFullPath);
+        AddJSONProperty(Props, 'pdf', Pdf);
+        AddJSONInteger(Props, 'zoomed_component_count', Found);
+        AddJSONProperty(Props, 'missing_designators', CommaList(Missing));
+        AddJSONProperty(Props, 'layers', CommaList(Names));
+        Result := BuildJSONObject(Props);
+        Props.Free;
+    end;
+    Names.Free;
+    Missing.Free;
+end;
+
+// get_screenshot: the document printed through Altium's own PCB or Schematic Print, published to PDF in the
+// request's folder (shot.pdf), which the server rasterises. A server started before the print path sends no
+// OutJob template and gets the window-grab protocol (TakeViewFocus).
+function TakeViewScreenshot(ViewType: String; DesignatorsList: TStringList; Document: String): String;
+begin
+    if FileExists(ROOT_DIR + 'shot_template.OutJob') then
+        Result := PrintView(LowerCase(ViewType), DesignatorsList, Document)
+    else
+        Result := TakeViewFocus(ViewType, DesignatorsList);
 end;

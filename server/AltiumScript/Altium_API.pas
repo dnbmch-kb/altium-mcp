@@ -1,35 +1,54 @@
 // altium_bridge.pas
-// This script acts as a bridge between the MCP server and Altium
-// It reads commands from a request JSON file, executes them, and writes results to a response JSON file
+// The bridge between the MCP servers and Altium. A server queues a request in the mailbox under
+// C:\Users\Public\altium_mcp\ (server/mailbox.py has the layout) and runs Run; Run takes the queued requests of the
+// server holding the one-script lock, each from its own folder mail\<id>\, reports progress to that folder's
+// progress.log and answers into its response.json with the request's id. A server started before the mailbox writes
+// request.json at the root instead and waits for response.json there; Run still answers that while such a server
+// holds the lock (ServeLegacy).
 
 const
-	constScriptProjectName = 'Altium_API'; // Define the script project name
+    constScriptProjectName = 'Altium_API'; // Define the script project name
     REPLACEALL = 1;
+    EXCHANGE_ROOT = 'C:\Users\Public\altium_mcp\';
+    LEGACY_MAX_AGE = 130;      // seconds: a single-file request older than this was given up by its server (it waits 120)
+    QUEUE_RUNS = 20;           // requests one run serves at most
 var
     RequestData : TStringList;
     ResponseData : TStringList;
     Params : TStringList;
-	REQUEST_FILE : String;
+    REQUEST_FILE : String;
     RESPONSE_FILE : String;
-    ROOT_DIR: String;
+    ROOT_DIR: String;          // the request's folder: its spec files are read and its temporary files written there
+    REQUEST_ID : String;       // '' for a single-file request
 
-{..............................................................................}
-{ Initialize file paths using a fixed exchange directory.                      }
-{ Both the Python MCP server and this script independently resolve to          }
-{ C:\Users\Public\altium_mcp\ — avoiding fragile script-project-path          }
-{ resolution that breaks when Altium caches stale script projects.             }
-{..............................................................................}
-procedure InitializeFilePaths();
+// The pid of the lock's holder ('' when nobody holds it); Legacy is set when the holder is an altium-mcp server
+// that speaks the single-file protocol (its lock owner names no mailbox).
+function LockHolderPid(var Legacy: Boolean): String;
+var
+    L    : TStringList;
+    S    : String;
+    P, Q : Integer;
 begin
-    ROOT_DIR := 'C:\Users\Public\altium_mcp\';
-
-    // Create the directory if it doesn't exist
-    if not DirectoryExists(ROOT_DIR) then
-        ForceDirectories(ROOT_DIR);
-
-    // Set the file paths
-    REQUEST_FILE := ROOT_DIR + 'request.json';
-    RESPONSE_FILE := ROOT_DIR + 'response.json';
+    Result := '';
+    Legacy := False;
+    S := '';
+    if not FileExists(EXCHANGE_ROOT + 'altium_script.lock') then Exit;
+    L := TStringList.Create;
+    try
+        L.LoadFromFile(EXCHANGE_ROOT + 'altium_script.lock');
+        S := L.Text;
+    except
+        S := '';
+    end;
+    L.Free;
+    P := Pos('"pid":', S);
+    if (P = 0) then Exit;
+    P := P + 6;
+    while (P <= Length(S)) and (S[P] = ' ') do P := P + 1;
+    Q := P;
+    while (Q <= Length(S)) and (S[Q] >= '0') and (S[Q] <= '9') do Q := Q + 1;
+    Result := Copy(S, P, Q - P);
+    Legacy := (Pos('"owner": "altium-mcp ', S) > 0) and (Pos('(mailbox)', S) = 0);
 end;
 
 // Extract the component pins logic
@@ -150,9 +169,11 @@ var
     i, ValueStart: Integer;
     ViewType: String;
     DesignatorsList: TStringList;
+    Document: String;
 begin
     // Extract the view type parameter
     ViewType := 'pcb';  // Default to PCB
+    Document := '';
     DesignatorsList := TStringList.Create;
 
     try
@@ -167,6 +188,8 @@ begin
                 ParamValue := TrimJSON(ParamValue);
                 ViewType := ParamValue;
             end
+            else if (Pos('"document"', RequestData[i]) > 0) then
+                Document := JSONLineValue(RequestData[i])
             // Look for optional designators array to zoom to before capture
             else if (Pos('"designators"', RequestData[i]) > 0) then
             begin
@@ -188,7 +211,7 @@ begin
             end;
         end;
 
-        Result := TakeViewScreenshot(ViewType, DesignatorsList);
+        Result := TakeViewScreenshot(ViewType, DesignatorsList, Document);
     finally
         DesignatorsList.Free;
     end;
@@ -1090,6 +1113,7 @@ end;
 function ExecuteCommand(CommandName: String): String;
 var
     ViewHint   : String;
+    ShotDocument : String;
     HintIdx    : Integer;
     HintStart  : Integer;
     HintValue  : String;
@@ -1097,8 +1121,10 @@ begin
     Result := '';
 
     // take_view_screenshot can target a PCB or a schematic. Pull view_type out
-    // of the request so the focus helper does not always demand a PCB.
+    // of the request so the focus helper does not always demand a PCB; a
+    // named document is printed wherever it is and needs no focus.
     ViewHint := '';
+    ShotDocument := '';
     if CommandName = 'take_view_screenshot' then
     begin
         for HintIdx := 0 to RequestData.Count - 1 do
@@ -1109,13 +1135,15 @@ begin
                 HintValue := Copy(RequestData[HintIdx], HintStart,
                                   Length(RequestData[HintIdx]) - HintStart + 1);
                 ViewHint := LowerCase(TrimJSON(HintValue));
-            end;
+            end
+            else if (Pos('"document"', RequestData[HintIdx]) > 0) then
+                ShotDocument := JSONLineValue(RequestData[HintIdx]);
         end;
     end;
 
     // A focus failure is an answer, not a dialog: WriteResponse turns the
     // 'ERROR: ' prefix into success=false with this message.
-    if not EnsureDocumentFocused(CommandName, ViewHint) then
+    if (ShotDocument = '') and not EnsureDocumentFocused(CommandName, ViewHint) then
     begin
         Result := 'ERROR: ' + FocusFailure;
         Exit;
@@ -1163,7 +1191,7 @@ begin
             Result := ExecuteCreateSymbolsBatch(RequestData);
         'build_circuit':
             Result := BuildCircuitFromSpec(ROOT_DIR + 'circuit_spec.txt',
-                                          ROOT_DIR + 'param_placement.txt');
+                                          EXCHANGE_ROOT + 'param_placement.txt');
         'get_footprint_primitives':
             Result := ExecuteGetFootprintPrimitives(RequestData);
         'create_footprints_batch':
@@ -1261,6 +1289,7 @@ begin
     try
         // Add properties
         AddJSONBoolean(ResultProps, 'success', ActualSuccess);
+        if (REQUEST_ID <> '') then AddJSONProperty(ResultProps, 'request_id', REQUEST_ID);
         
         if ActualSuccess then
         begin
@@ -1275,17 +1304,24 @@ begin
             AddJSONProperty(ResultProps, 'error', ActualErrorMsg);
         end;
         
-        // Build response
+        // Build response: a mailbox answer appears whole, renamed into place, so the server never reads half of it
         ResponseData.Text := BuildJSONObject(ResultProps);
-        ResponseData.SaveToFile(RESPONSE_FILE);
+        if (REQUEST_ID <> '') then
+        begin
+            ResponseData.SaveToFile(ROOT_DIR + 'response.tmp');
+            BridgeProgress('answered', 0, 0);
+            RenameFile(ROOT_DIR + 'response.tmp', RESPONSE_FILE);
+        end
+        else
+            ResponseData.SaveToFile(RESPONSE_FILE);
     finally
         ResultProps.Free;
         ResponseData.Free;
     end;
 end;
 
-// Main procedure to run the bridge
-procedure Run;
+// Read REQUEST_FILE, run its command and answer into RESPONSE_FILE
+procedure HandleRequest;
 var
     CommandType: String;
     Result: String;
@@ -1293,9 +1329,6 @@ var
     Line: String;
     ValueStart: Integer;
 begin
-    // Initialize file paths based on script location
-    InitializeFilePaths();
-
     // Check if request file exists
     if not FileExists(REQUEST_FILE) then
     begin
@@ -1364,6 +1397,82 @@ begin
         WriteResponse(False, '', 'Exception occurred during script execution');
         LogScriptError('Error: Exception occurred during script execution');
     end;
+end;
+
+// One mailbox request, already taken: its folder is mail\<Id>\
+procedure ServeRequest(Id: String);
+begin
+    REQUEST_ID := Id;
+    ROOT_DIR := EXCHANGE_ROOT + 'mail\' + Id + '\';
+    REQUEST_FILE := ROOT_DIR + 'request.json';
+    RESPONSE_FILE := ROOT_DIR + 'response.json';
+    BridgeProgressBegin(ROOT_DIR + 'progress.log');
+    BridgeProgress('taken', 0, 0);
+    HandleRequest;
+    BridgeProgressEnd;
+    REQUEST_ID := '';
+end;
+
+// Take and serve the queued requests of the lock's holder, oldest first; a queued request of anyone else was
+// left by a server that no longer holds the lock and is never run. Taking is a rename of queue\<id>.req into
+// the request's folder, so a request is taken once. Returns how many were served.
+function ServeQueue(HolderPid: String): Integer;
+var
+    Files : TStringList;
+    i     : Integer;
+    Id    : String;
+    Taken : Boolean;
+begin
+    Result := 0;
+    if (HolderPid = '') or not DirectoryExists(EXCHANGE_ROOT + 'queue') then Exit;
+    repeat
+        Taken := False;
+        Files := TStringList.Create;
+        FindFiles(EXCHANGE_ROOT + 'queue\', '*.req', faAnyFile, False, Files);
+        Files.Sort;
+        for i := 0 to Files.Count - 1 do
+        begin
+            Id := ExtractFileName(Files[i]);
+            Id := Copy(Id, 1, Length(Id) - 4);
+            if (Copy(Id, 1, Length(HolderPid) + 1) = HolderPid + '-') and
+               DirectoryExists(EXCHANGE_ROOT + 'mail\' + Id) and
+               RenameFile(Files[i], EXCHANGE_ROOT + 'mail\' + Id + '\taken') then
+            begin
+                ServeRequest(Id);
+                Result := Result + 1;
+                Taken := True;
+                Break;
+            end;
+        end;
+        Files.Free;
+    until (not Taken) or (Result >= QUEUE_RUNS);
+end;
+
+// A server started before the mailbox: request.json at the root, unanswered (it deletes response.json before it
+// writes the request) and younger than its server's wait
+procedure ServeLegacy;
+begin
+    REQUEST_ID := '';
+    ROOT_DIR := EXCHANGE_ROOT;
+    REQUEST_FILE := ROOT_DIR + 'request.json';
+    RESPONSE_FILE := ROOT_DIR + 'response.json';
+    if not FileExists(REQUEST_FILE) or FileExists(RESPONSE_FILE) then Exit;
+    if ((Now - FileDateToDateTime(FileAge(REQUEST_FILE))) * 86400 > LEGACY_MAX_AGE) then Exit;
+    HandleRequest;
+end;
+
+// Main procedure to run the bridge
+procedure Run;
+var
+    Holder : String;
+    Legacy : Boolean;
+begin
+    REQUEST_ID := '';
+    ROOT_DIR := EXCHANGE_ROOT;
+    PROGRESS_FILE := '';
+    if not DirectoryExists(EXCHANGE_ROOT) then ForceDirectories(EXCHANGE_ROOT);
+    Holder := LockHolderPid(Legacy);
+    if (ServeQueue(Holder) = 0) and Legacy then ServeLegacy;
 end;
 
 

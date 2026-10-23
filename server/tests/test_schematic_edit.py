@@ -173,7 +173,7 @@ class ToolValidationTest(unittest.TestCase):
         self.main = main
         self.calls = []
 
-        async def refuse(command, params):
+        async def refuse(command, params, **kw):
             self.calls.append(command)
             return {"success": False, "error": "bridge must not be called"}
         self.saved = main.altium_bridge.execute_command
@@ -211,17 +211,16 @@ class TwoPassTest(unittest.TestCase):
         self.sheet.write_bytes(b"x")
         self.lib = base / "parts.SchLib"
         self.lib.write_bytes(b"x")
-        self.saved = (main.altium_bridge.execute_command, main.EDIT_SPEC_FILE)
-        main.EDIT_SPEC_FILE = base / "edit_spec.txt"
+        self.saved = main.altium_bridge.execute_command
         self.specs, self.answers = [], []
 
-        async def bridge(command, params):
-            self.specs.append(main.EDIT_SPEC_FILE.read_text(encoding="utf-8-sig").splitlines())
+        async def bridge(command, params, files=None, ctx=None, **kw):
+            self.specs.append(files[main.EDIT_SPEC_FILE].splitlines())
             return {"success": True, "result": self.answers.pop(0)}
         main.altium_bridge.execute_command = bridge
 
     def tearDown(self):
-        self.main.altium_bridge.execute_command, self.main.EDIT_SPEC_FILE = self.saved
+        self.main.altium_bridge.execute_command = self.saved
         self.tmp.cleanup()
 
     def run_tool(self, ops):
