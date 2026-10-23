@@ -2490,7 +2490,7 @@ end;
 // Each entry in PlacementsList is 'Designator|X|Y|Rotation|Layer' where X/Y
 // are mils relative to the board origin, Rotation is degrees CCW (-1 = keep
 // current) and Layer is 'top', 'bottom' or '' (keep current side).
-function PlaceComponentsFromList(PlacementsList: TStringList): String;
+function PlaceComponentsFromList(PlacementsList: TStringList; BoardPath: String): String;
 var
     Board            : IPCB_Board;
     Component        : IPCB_Component;
@@ -2508,10 +2508,22 @@ var
     i                : Integer;
     PlacedCount      : Integer;
 begin
+    // A named board is shown and checked: with several boards open the current one is not always the one meant
+    if (BoardPath <> '') then
+        if (OpenLibraryDocument('PCB', BoardPath) = nil) then
+        begin
+            Result := 'ERROR: cannot open ' + BoardPath;
+            Exit;
+        end;
     Board := GetBoardSafe(0);
     if (Board = nil) then
     begin
         Result := 'ERROR: No PCB document is currently active';
+        Exit;
+    end;
+    if (BoardPath <> '') and (NormalizedPath(Board.FileName) <> NormalizedPath(BoardPath)) then
+    begin
+        Result := 'ERROR: the active board is ' + Board.FileName + ', not ' + BoardPath;
         Exit;
     end;
 
@@ -2536,7 +2548,7 @@ begin
                 NewX := SafeStrToFloat(GetFieldFromPipeString(Entry, 1));
                 NewY := SafeStrToFloat(GetFieldFromPipeString(Entry, 2));
 
-                // Rotation is optional: missing/empty field means keep current
+                // Rotation (Altium's own, the server applies the side convention): missing or negative keeps it
                 FieldValue := Trim(GetFieldFromPipeString(Entry, 3));
                 if (FieldValue <> '') then
                     Rotation := SafeStrToFloat(FieldValue)
@@ -2551,9 +2563,7 @@ begin
                 begin
                     PCBServer.SendMessageToRobots(Component.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
 
-                    // Change layer first: flipping mirrors the footprint, so
-                    // position and rotation are applied afterwards to keep the
-                    // requested values authoritative
+                    // Side first: the flip mirrors the footprint, so position and rotation follow it
                     if (LayerStr = 'top') and (Component.Layer = eBottomLayer) then
                         Component.Layer := eTopLayer
                     else if (LayerStr = 'bottom') and (Component.Layer = eTopLayer) then
@@ -2565,20 +2575,6 @@ begin
                         Component.Rotation := Rotation;
 
                     PCBServer.SendMessageToRobots(Component.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
-
-                    // Report the final state as Altium sees it
-                    CompProps := TStringList.Create;
-                    try
-                        AddJSONProperty(CompProps, 'designator', Component.Name.Text);
-                        AddJSONNumber(CompProps, 'x', CoordToMils(Component.x - xorigin));
-                        AddJSONNumber(CompProps, 'y', CoordToMils(Component.y - yorigin));
-                        AddJSONNumber(CompProps, 'rotation', Component.Rotation);
-                        AddJSONProperty(CompProps, 'layer', Layer2String(Component.Layer));
-                        PlacedArray.Add(BuildJSONObject(CompProps, 2));
-                    finally
-                        CompProps.Free;
-                    end;
-
                     PlacedCount := PlacedCount + 1;
                 end
                 else
@@ -2589,10 +2585,31 @@ begin
         end;
 
         PCBServer.PostProcess;
-
-        // Update PCB document
         Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
 
+        // Read back after the transaction, each part looked up again: what the board holds, not what was set
+        for i := 0 to PlacementsList.Count - 1 do
+        begin
+            Designator := Trim(GetFieldFromPipeString(Trim(PlacementsList[i]), 0));
+            Component := nil;
+            if (Designator <> '') then Component := Board.GetPcbComponentByRefDes(Designator);
+            if (Component <> nil) then
+            begin
+                CompProps := TStringList.Create;
+                try
+                    AddJSONProperty(CompProps, 'designator', Component.Name.Text);
+                    AddJSONNumber(CompProps, 'x', CoordToMils(Component.x - xorigin));
+                    AddJSONNumber(CompProps, 'y', CoordToMils(Component.y - yorigin));
+                    AddJSONNumber(CompProps, 'rotation', Component.Rotation);
+                    AddJSONProperty(CompProps, 'layer', Layer2String(Component.Layer));
+                    PlacedArray.Add(BuildJSONObject(CompProps, 2));
+                finally
+                    CompProps.Free;
+                end;
+            end;
+        end;
+
+        AddJSONProperty(ResultProps, 'board', Board.FileName);
         AddJSONInteger(ResultProps, 'placed_count', PlacedCount);
 
         if (MissingArray.Count > 0) then

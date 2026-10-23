@@ -707,7 +707,9 @@ var
     ParamValue: String;
     i: Integer;
     PlacementsList: TStringList;
+    BoardPath: String;
 begin
+    BoardPath := '';
     // Placements arrive as an array of pipe-delimited strings
     // ('Designator|X|Y|Rotation|Layer') so the line-based parser stays robust
     PlacementsList := TStringList.Create;
@@ -716,6 +718,8 @@ begin
         // Parse parameters from the request
         for i := 0 to RequestData.Count - 1 do
         begin
+            if (Pos('"board"', RequestData[i]) > 0) then
+                BoardPath := JSONLineValue(RequestData[i]);
             // Look for placements array
             if (Pos('"placements"', RequestData[i]) > 0) then
             begin
@@ -740,7 +744,7 @@ begin
 
         if PlacementsList.Count > 0 then
         begin
-            Result := PlaceComponentsFromList(PlacementsList);
+            Result := PlaceComponentsFromList(PlacementsList, BoardPath);
         end
         else
         begin

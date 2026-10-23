@@ -1885,91 +1885,143 @@ async def move_components(ctx: Context, cmp_designators: list, x_offset: float, 
     logger.info(f"Components moved successfully")
     return json.dumps({"success": True, "result": result}, indent=2)
 
+def altium_rotation(rotation: float, side: str) -> float:
+    """Altium's stored rotation for a part placed at `rotation` on `side`.
+
+    The rotation is counter-clockwise as seen from the top; a bottom part's is the angle of its footprint mirrored
+    left to right (x negated) and then turned, the convention KiCad's placement and the house capture scripts
+    use. Altium's flip mirrors the footprint top to bottom (y negated) instead, so it stores the angle + 180 for
+    a bottom part (laser-calib raw-head adapter, 2026-10-23: J4 at 90 and C18-C20 at 270 landed on their pads
+    only with it)."""
+    return (rotation + 180) % 360 if side == "bottom" else rotation % 360
+
+
+def side_rotation(stored: float, side: str) -> float:
+    """altium_rotation's inverse: the convention's angle of a part Altium stores at `stored`."""
+    return (stored - 180) % 360 if side == "bottom" else stored % 360
+
+
 @mcp.tool()
-async def place_components(ctx: Context, placements: list) -> str:
+async def place_components(ctx: Context, placements: list, board: str = "") -> str:
     """
     Place multiple components at absolute positions in a single Altium transaction.
 
     This is the batch version of set_component_position - prefer it whenever
     placing more than one component, since every tool call is a full round
-    trip into Altium. The whole batch is one undo step.
+    trip into Altium. The whole batch is one undo step. Every part is read back
+    from the board after the transaction; a part that does not hold what was set
+    is an error. The board is not saved.
 
     Coordinate conventions: x/y are in mils relative to the board origin;
-    rotation is in degrees counterclockwise.
+    rotation is in degrees counter-clockwise as seen from the top. A bottom
+    part's rotation is that of its footprint mirrored left to right and then
+    turned (KiCad's convention): Altium's own flip mirrors top to bottom, so the
+    tool stores rotation + 180 for a bottom part and reads both back.
 
     Args:
         placements (list): One dict per component:
             - designator (str, required): e.g. "R1"
             - x (float, required): absolute X position in mils
             - y (float, required): absolute Y position in mils
-            - rotation (float, optional): absolute rotation in degrees (0-360).
-              Omit (or pass -1) to keep the current rotation.
-            - layer (str, optional): "top" or "bottom" to set the board side
-              (the footprint is mirrored when flipped). Omit to keep the
-              current side.
+            - rotation (float, optional): degrees (0-360) in the convention
+              above. Omit (or pass -1) to keep Altium's current rotation.
+            - side (str, optional): "top" or "bottom"; the footprint is
+              mirrored when it changes side. Omit to keep the current side.
+        board (str, optional): full path of the .PcbDoc to place on; it is
+            shown first and checked. Default: the current board.
 
     Example:
         placements=[{"designator": "R1", "x": 1000, "y": 2000, "rotation": 90},
-                    {"designator": "C5", "x": 1050, "y": 2000, "layer": "bottom"}]
+                    {"designator": "J4", "x": 1050, "y": 2000, "rotation": 90, "side": "bottom"}]
 
     Returns:
-        str: JSON object with placed_count, missing_designators, and the final
-             x/y/rotation/layer of each placed component as Altium reports them
+        str: JSON with success, board, placed_count, missing_designators, components
+             [{designator, x, y, side, rotation, altium_rotation}] as the board holds them
+             after the transaction, and errors for every part that does not hold its request
     """
     logger.info(f"Placing {len(placements)} components")
 
     # Flatten each placement into a pipe-delimited string
-    # ('Designator|X|Y|Rotation|Layer') - the DelphiScript side parses the
+    # ('Designator|X|Y|AltiumRotation|side') - the DelphiScript side parses the
     # request line by line, so nested JSON objects are not safe to send
-    entries = []
-    errors = []
+    entries, errors, wanted = [], [], {}
     for idx, placement in enumerate(placements):
         if not isinstance(placement, dict):
             errors.append(f"placements[{idx}] must be an object")
             continue
-
         designator = str(placement.get("designator", "")).strip()
-        x = placement.get("x")
-        y = placement.get("y")
-
+        x, y = placement.get("x"), placement.get("y")
         if not designator or x is None or y is None:
             errors.append(f"placements[{idx}] must include designator, x, and y")
             continue
         if "|" in designator:
             errors.append(f"placements[{idx}] designator must not contain '|'")
             continue
-
-        rotation = placement.get("rotation", -1)
-        layer = str(placement.get("layer", "") or "").strip().lower()
-        if layer not in ("", "top", "bottom"):
-            errors.append(f"placements[{idx}] layer must be 'top' or 'bottom'")
+        if "layer" in placement:
+            errors.append(f"placements[{idx}]: 'layer' is now 'side' (top or bottom)")
             continue
-
+        side = str(placement.get("side", "") or "").strip().lower()
+        if side not in ("", "top", "bottom"):
+            errors.append(f"placements[{idx}] side must be 'top' or 'bottom'")
+            continue
         try:
-            entry = f"{designator}|{float(x)}|{float(y)}|{float(rotation)}|{layer}"
+            x, y, rotation = float(x), float(y), float(placement.get("rotation", -1))
         except (TypeError, ValueError):
             errors.append(f"placements[{idx}] x, y, and rotation must be numbers")
             continue
-        entries.append(entry)
+        if rotation >= 0 and not side:
+            errors.append(f"placements[{idx}]: a rotation needs its side (top or bottom), the convention differs")
+            continue
+        stored = altium_rotation(rotation, side) if rotation >= 0 else -1
+        entries.append(f"{designator}|{x}|{y}|{stored}|{side}")
+        wanted[designator] = (x, y, rotation % 360 if rotation >= 0 else None, side)
 
     if errors:
         return json.dumps({"success": False, "error": "; ".join(errors)})
     if not entries:
         return json.dumps({"success": False, "error": "No placements provided"})
+    if board and (not Path(board).is_absolute() or Path(board).suffix.lower() != ".pcbdoc"):
+        return json.dumps({"success": False, "error": f"board must be the full path of a .PcbDoc: {board}"})
 
-    response = await altium_bridge.execute_command(
-        "place_components",
-        {"placements": entries}
-    )
-
+    params = {"placements": entries}
+    if board:
+        params["board"] = str(Path(board))
+    response = await altium_bridge.execute_command("place_components", params)
     if not response.get("success", False):
         error_msg = response.get("error", "Unknown error")
         logger.error(f"Error placing components: {error_msg}")
         return json.dumps({"success": False, "error": f"Failed to place components: {error_msg}"})
 
     result = response.get("result", {})
-    logger.info(f"Placed components successfully")
-    return json.dumps({"success": True, "result": result}, indent=2)
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except ValueError:
+            return json.dumps({"success": False, "error": "unreadable answer", "raw_response": result[:500]})
+    result["errors"] = placement_mismatches(result.get("components", []), wanted)
+    result["success"] = not result["errors"] and not result.get("missing_designators")
+    return json.dumps(result, indent=2)
+
+
+def placement_mismatches(components: list, wanted: dict) -> list:
+    """Each read-back part gets side, rotation (the convention) and altium_rotation; returns what differs from the
+    request: position beyond 0.01 mil, side, or rotation beyond 0.01 degree."""
+    errors = []
+    for c in components:
+        side = "bottom" if "bottom" in str(c.get("layer", "")).lower() else "top"
+        stored = float(c.get("rotation", 0))
+        c.update(side=side, altium_rotation=stored, rotation=round(side_rotation(stored, side), 4))
+        c.pop("layer", None)
+        x, y, rotation, want_side = wanted.get(c.get("designator"), (None, None, None, ""))
+        des = c.get("designator")
+        if x is not None and (abs(float(c["x"]) - x) > 0.01 or abs(float(c["y"]) - y) > 0.01):
+            errors.append(f"{des} is at ({c['x']}, {c['y']}), not ({x:g}, {y:g})")
+        if want_side and side != want_side:
+            errors.append(f"{des} is on the {side}, not the {want_side}")
+        if rotation is not None and min(abs(c["rotation"] - rotation), 360 - abs(c["rotation"] - rotation)) > 0.01:
+            errors.append(f"{des} holds rotation {c['rotation']:g} (Altium {stored:g}), not {rotation:g}")
+    return errors
+
 
 def _mst_length(points: list) -> float:
     """Minimum-spanning-tree length over (x, y) points (Prim's algorithm)."""
