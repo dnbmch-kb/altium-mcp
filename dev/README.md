@@ -184,6 +184,11 @@ Each found on a board and checked by a readback; the date and the board say wher
   channel, which gives the same rooms and channel designators (dss-r0-aiv CTRL, 2026-10-23).
 - **A via's tenting holds only in manual mask mode**: `SolderMaskExpansionMode := eMaskExpansionMode_Manual`
   before `IsTenting_Top` / `IsTenting_Bottom` (laser-calib raw-head adapter, 2026-10-23).
+- **A bottom part is mirrored top to bottom, then turned counter-clockwise by its `Rotation`**: pad 1 of
+  IC_SOT23_5 read back on the bottom at 0, 90 and 180 (scratch board, 2026-10-23). A part placed in a frame that
+  mirrors left to right (KiCad's) takes its angle + 180; 90 and 270 alone cannot tell + 180 from 360 - angle.
+- **`IntToStr(Obj.I_ObjectAddress)` pauses the script**: an object address goes to `SendMessage` and compares with
+  `<>`, but does not convert to text (edit_schematic's first live two-pass run, 2026-10-23).
 - **A design rule's enable flag is `DRCEnabled`**; the saved `ENABLED` field follows it, `Enabled` is not stored
   (raw-head adapter, 2026-10-23).
 

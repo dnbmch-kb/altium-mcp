@@ -117,10 +117,8 @@ beside it, or a label. `ePowerGndPower`=4, `ePowerGndSignal`=5 and
 `ePowerGndEarth`=6 are easy to confuse, and the wrong one looks plausible.
 
 On style 5, `ShowNetName := False` read back False and Altium still drew "GND"
-below the symbol, so a style-5 ground occupied about 300 mil below itself. The
-ToF master's print shows style-4 ports with no text; whether the script's
-`ShowNetName := False` hides the name on style 4 is the live check to run
-before relying on it.
+below the symbol, so a style-5 ground occupied about 300 mil below itself. On style 4 it hides the name:
+the scratch sheet's grounds drew no text (headless render, 2026-10-23), as the ToF master's print shows.
 
 ## 8. Net labels must touch the wire
 
