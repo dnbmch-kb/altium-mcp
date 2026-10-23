@@ -23,3 +23,6 @@ dev/make_circuit.py
 dev/sheet*_parts.json
 dev/sheet*_rebuild.py
 altium-mcp-requests.md
+
+# Altium preference backups: the AltiumPortal\Account key holds the account session tokens (dev/altium_startup.md)
+dev/altium_prefs_backup_*.reg
