@@ -7,3 +7,4 @@ worked around by a script in that session, none fixed here yet.
 - **`delete_component` and `detach_pin` leave net labels floating** although the tool reports them removed; the labels have to be deleted by ID afterwards. Fix: remove the labels the deleted wire stubs carried, and report what was actually removed.
 - **`no_erc_pins` adds a second No-ERC marker where one already sits.** Fix: check for an existing marker on the pin before placing.
 - **`replace` can leave pins unconnected and report failure** (J3's USB swap: three pins left open). Fix: after the swap, re-wire by pin name where the new symbol's pins match, and list the pins it could not rewire.
+- **`rename_label` keeps the old stub length** (MCB J9 round, `4e74e21`): a shorter name leaves the wire stub more than 250 mil past the label, which `sch_check.py` reports as an open wire end. Fix: shorten or redraw the stub to the new label's extent; until then delete the wire and redraw it with the `wire` op.
