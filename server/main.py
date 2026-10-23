@@ -2886,8 +2886,8 @@ async def _edit_command(sheet: str, ops: list, power_nets: list, save: bool, ctx
         first["overlaps"] = objects["overlaps"]
     unbound = schematic_edit.unbound_models(first.get("placed", []))
     if unbound:
-        errors.append("models not taken from their component library (the ECO would search every installed "
-                      "library for them): " + ", ".join(unbound))
+        errors.append("models on library Any, neither taken from their component library nor given a library path "
+                      "(the ECO would search every installed library for them): " + ", ".join(unbound))
     if "error" not in first:
         first["success"] = not errors
     return json.dumps(first, indent=2, ensure_ascii=False)
@@ -2946,8 +2946,9 @@ async def edit_schematic(ctx: Context, sheet: str, ops: list, power_nets: list =
             {"op": "no_erc_pins", "comp", "pins": [..]}
             {"op": "attach_entry", "symbol", "entry", "net"}   a sheet symbol's entry
             {"op": "place", "designator", "symbol_library", "lib_ref", "x", "y", "orient", "mirror",
-             "link_library", "db_table", "design_item", "footprint", "comment", "description", "parameters": {},
-             "pins": {pin: net}, "no_erc": [pin], "part"} symbol copied from a .SchLib; link_library (e.g.
+             "link_library", "db_table", "design_item", "footprint", "footprint_library", "comment", "description",
+             "parameters": {}, "pins": {pin: net}, "no_erc": [pin], "part"}
+                                                         symbol copied from a .SchLib; link_library (e.g.
                                                          "dnbm.IntLib" or "Res-Gen.DbLib") is what it links to;
                                                          part (1 = A, 2 = B, ...) places one part of a multi-part
                                                          symbol, one place op per part under one designator;
@@ -2955,14 +2956,18 @@ async def edit_schematic(ctx: Context, sheet: str, ops: list, power_nets: list =
                                                          component description, as build_schematic's does).
                                                          Altium keeps no parameter named Description, so a
                                                          "Description" key in parameters (any case) sets the
-                                                         component description too; given both, they must match
+                                                         component description too; given both, they must match.
+                                                         footprint_library, for a part without a database row
+                                                         (no design_item): the full path of the .PcbLib holding
+                                                         footprint; the model takes it by that path, not from the
+                                                         component library, which has no row to give one
             {"op": "replace", "comp", "symbol_library", "lib_ref", "pin_map": {old: new},
              "nets": {new_pin: net}, place's link fields, "description", "parameters": {}}
                                                          every mapped new pin needs its net: the old pin's end
                                                          gets the same net, so the old wiring keeps it
-            {"op": "relink", "comp", "link_library", "db_table", "design_item", "footprint", "comment",
-             "description", "parameters": {}}            changes a part's library link and keeps its symbol;
-                                                         description and parameters as in place
+            {"op": "relink", "comp", "link_library", "db_table", "design_item", "footprint", "footprint_library",
+             "comment", "description", "parameters": {}} changes a part's library link and keeps its symbol;
+                                                         footprint_library, description and parameters as in place
             {"op": "wire", "points": [P, P, ...], "junctions": [P]}   orthogonal segments through the points; a
                                                          point P is [x, y] or {"comp": "des:R1", "pin": "2"} (that
                                                          pin's end); junctions only at tees
@@ -2976,9 +2981,10 @@ async def edit_schematic(ctx: Context, sheet: str, ops: list, power_nets: list =
     Returns:
         str: JSON with success, sheet, saved, ops, errors [..], placed [{designator, uid, x, y,
              pins [[pin, x, y]], unassigned_pins, library, design_item, models [{type, name, current,
-             use_component_library}]}], connections [{designator, pins, net, kind, boxes [[l, b, r, t]]}],
-             overlaps [..]. A part linked to an IntLib or DbLib takes every model from that library ("Use Component
-             Library", as a hand-placed part does); one that does not is an error.
+             use_component_library, library_path}]}], connections [{designator, pins, net, kind,
+             boxes [[l, b, r, t]]}], overlaps [..]. A part linked to an IntLib or DbLib takes every model from that
+             library ("Use Component Library", as a hand-placed part does) but the footprint given a
+             footprint_library; a model on library Any (neither) is an error.
     """
     return await _edit_command(sheet, ops, power_nets, save, ctx)
 

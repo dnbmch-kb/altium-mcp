@@ -83,6 +83,33 @@ class EditSpecTest(unittest.TestCase):
             with self.subTest(msg=msg), self.assertRaisesRegex(ValueError, msg):
                 self.spec([bad])
 
+    def test_a_part_without_a_row_takes_its_footprint_library_as_the_last_field(self):
+        pcblib = self.lib.with_name("Res-Gen.PcbLib")
+        pcblib.write_bytes(b"x")
+        op = {"op": "place", "designator": "R7", "symbol_library": str(self.lib), "lib_ref": "RESISTOR",
+              "x": 100, "y": 200, "link_library": "Res-Gen.DbLib", "db_table": "Resistors$",
+              "footprint": "RES_0603_1608", "comment": "4k7", "footprint_library": str(pcblib)}
+        self.assertIn(f"PLACE|R7|{self.lib}|RESISTOR|100|200|0|0|Res-Gen.DbLib|Resistors$||RES_0603_1608|4k7||{pcblib}",
+                      self.spec([op]))                    # field 13, the part, empty; 14 the library
+        self.assertIn(f"PLACE|R7|{self.lib}|RESISTOR|100|200|0|0|Res-Gen.DbLib|Resistors$||RES_0603_1608|4k7|2|{pcblib}",
+                      self.spec([dict(op, part=2)]))
+        replace = {"op": "replace", "comp": "des:R7", "symbol_library": str(self.lib), "lib_ref": "RESISTOR",
+                   "pin_map": {"1": "1"}, "nets": {"1": "A"}, "footprint": "RES_0603_1608",
+                   "footprint_library": str(pcblib)}
+        self.assertIn(f"REPLACE|des:R7|{self.lib}|RESISTOR|-1|0||||RES_0603_1608||{pcblib}", self.spec([replace]))
+        self.assertIn(f"RELINK|des:R7|Res-Gen.DbLib|||RES_0603_1608||{pcblib}",
+                      self.spec([{"op": "relink", "comp": "des:R7", "link_library": "Res-Gen.DbLib",
+                                  "footprint": "RES_0603_1608", "footprint_library": str(pcblib)}]))
+        # without it every line reads as before: nothing after the link fields
+        self.assertIn(f"PLACE|R7|{self.lib}|RESISTOR|100|200|0|0|Res-Gen.DbLib|Resistors$||RES_0603_1608|4k7",
+                      self.spec([dict(op, footprint_library=None)]))
+        for bad, msg in ((dict(op, design_item="MPN-R-1"), "without a database row"),
+                         (dict(op, footprint=None), "needs footprint"),
+                         (dict(op, footprint_library="Res-Gen.PcbLib"), "existing .PcbLib"),
+                         (dict(op, footprint_library=str(self.lib)), "existing .PcbLib")):
+            with self.subTest(msg=msg), self.assertRaisesRegex(ValueError, msg):
+                self.spec([bad])
+
     def test_replace_needs_a_net_for_every_mapped_pin_and_maps_by_function(self):
         op = {"op": "replace", "comp": "uid:XHHAWBYW", "symbol_library": str(self.lib), "lib_ref": "BZT52H-B5V6-QX",
               "pin_map": {"2": "1", "1": "2"}, "nets": {"1": "5V"}}
@@ -298,10 +325,28 @@ class TwoPassTest(unittest.TestCase):
                                   "GRM155R71H104KE14D||")
         self.assertEqual(spec[i + 1:], ["DESCRIPTION|PROOF DESC 0.1UF", "PARAM|Proof|1", "END", "SAVE"])
 
+    def test_a_footprint_by_library_path_is_sent_and_read_back_as_bound(self):
+        pcblib = self.lib.with_name("Res-Gen.PcbLib")
+        pcblib.write_bytes(b"x")
+        located = dict(self.placed(bound=False), designator="R7", library="Res-Gen.DbLib", design_item="RESISTOR",
+                       models=[{"type": "PCBLIB", "name": "RES_0603_1608", "current": True,
+                                "use_component_library": False, "library_path": str(pcblib)}])
+        self.answers = [{"success": True, "sheet": str(self.sheet), "saved": str(self.sheet), "ops": 1, "errors": [],
+                         "placed": [located], "pending": [], "geometry": None}]
+        r = self.run_tool([{"op": "place", "designator": "R7", "symbol_library": str(self.lib), "lib_ref": "RESISTOR",
+                            "x": 1000, "y": 1000, "link_library": "Res-Gen.DbLib", "footprint": "RES_0603_1608",
+                            "footprint_library": str(pcblib)}])
+        self.assertTrue(r["success"], r)                      # a library path is not library Any
+        self.assertEqual(self.specs[0][-3:], [f"PLACE|R7|{self.lib}|RESISTOR|1000|1000|0|0|Res-Gen.DbLib|||"
+                                              f"RES_0603_1608|||{pcblib}", "END", "SAVE"])
+
     def test_unbound_models_ignore_unlinked_parts(self):
         part = dict(self.placed(bound=False), library="parts.SchLib")
         self.assertEqual(se.unbound_models([part]), [])
         self.assertEqual(se.unbound_models([self.placed(bound=False)]), ["JP1 PCBLIB HDR_1X03"])
+        anywhere = self.placed(bound=False)
+        anywhere["models"][0]["library_path"] = ""
+        self.assertEqual(se.unbound_models([anywhere]), ["JP1 PCBLIB HDR_1X03"])
 
 
 if __name__ == "__main__":

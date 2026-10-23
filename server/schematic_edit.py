@@ -127,6 +127,25 @@ def _link_fields(op, what):
                     for k in ("link_library", "db_table", "design_item", "footprint", "comment"))
 
 
+def _footprint_library(op, what):
+    """The PcbLib a part without a database row takes its footprint from, by full path, or "". A DbLib part
+    without a row has none to take the footprint from: on Use Component Library the ECO reported Footprint Not
+    Found (dss-r0-aiv CTRL, 47 passives, 2026-10-24). Sent as the last field of the op's line, so a spec without it
+    reads as before."""
+    path = op.get("footprint_library")
+    if path in (None, ""):
+        return ""
+    if op.get("design_item") not in (None, ""):
+        raise ValueError(f"{what}: footprint_library is for a part without a database row; design_item's row "
+                         "names the footprint")
+    if op.get("footprint") in (None, ""):
+        raise ValueError(f"{what}: footprint_library needs footprint, the footprint's name in it")
+    p = Path(str(path))
+    if p.suffix.lower() != ".pcblib" or not p.is_absolute() or not p.is_file():
+        raise ValueError(f"{what}: footprint_library must be the full path of an existing .PcbLib: {path}")
+    return _text(p, what + " footprint_library")
+
+
 def _description(op, what):
     """The part's own Description: the op's description, or a parameter named Description (any case). Altium keeps
     no parameter of that name - a DbLib column mapped to Description lands in the component description - so one
@@ -207,18 +226,24 @@ def edit_spec(sheet, ops, power_nets=None, save=True):
                 _text(op["designator"], what + " designator"), _schlib(op["symbol_library"], what),
                 _text(op["lib_ref"], what + " lib_ref"), _int(op["x"], what + " x"), _int(op["y"], what + " y"),
                 int(op.get("orient", 0)) % 4, 1 if op.get("mirror") else 0, _link_fields(op, what))
-            if op.get("part") is not None:                # one part of a multi-part symbol (2 = B, ...)
-                part = op["part"]
+            part = op.get("part")
+            if part is not None:                          # one part of a multi-part symbol (2 = B, ...)
                 if isinstance(part, bool) or not isinstance(part, int) or part < 1:
                     raise ValueError(f"{what}: part must be a whole number from 1: {part!r}")
-                line += f"|{part}"
+            footprint_library = _footprint_library(op, what)
+            if part is not None or footprint_library:
+                line += f"|{'' if part is None else part}"
+            if footprint_library:
+                line += f"|{footprint_library}"
             lines.append(line)
             lines += _part_block(op, what, power) + ["END"]
         elif kind == "replace":
+            footprint_library = _footprint_library(op, what)
             lines.append("REPLACE|{}|{}|{}|{}|{}|{}".format(
                 _comp(op["comp"], what + " comp"), _schlib(op["symbol_library"], what),
                 _text(op["lib_ref"], what + " lib_ref"),
-                int(op["orient"]) % 4 if "orient" in op else -1, 1 if op.get("mirror") else 0, _link_fields(op, what)))
+                int(op["orient"]) % 4 if "orient" in op else -1, 1 if op.get("mirror") else 0, _link_fields(op, what))
+                + (f"|{footprint_library}" if footprint_library else ""))
             nets = {str(k): v for k, v in (op.get("nets") or {}).items()}
             if not op["pin_map"]:
                 raise ValueError(f"{what}: empty pin_map")
@@ -235,7 +260,9 @@ def edit_spec(sheet, ops, power_nets=None, save=True):
             extra = {k: v for k, v in nets.items() if k not in mapped}
             lines += _part_block(dict(op, pins=extra), what, power) + ["END"]
         elif kind == "relink":
-            lines.append(f"RELINK|{_comp(op['comp'], what + ' comp')}|{_link_fields(op, what)}")
+            footprint_library = _footprint_library(op, what)
+            lines.append(f"RELINK|{_comp(op['comp'], what + ' comp')}|{_link_fields(op, what)}"
+                         + (f"|{footprint_library}" if footprint_library else ""))
             lines += _part_block(dict(op, pins={}, no_erc=()), what, power) + ["END"]
     if save:
         lines.append("SAVE")
@@ -244,12 +271,13 @@ def edit_spec(sheet, ops, power_nets=None, save=True):
 
 def unbound_models(placed):
     """'R1 PCBLIB RES_0402' for every model of a placed part linked to an IntLib or DbLib that the bridge read back
-    without "Use Component Library": the ECO then searches every installed library for it."""
+    on library Any - neither "Use Component Library" nor a library path: the ECO then searches every installed
+    library for it."""
     out = []
     for part in placed:
         if part.get("library", "").lower().endswith((".intlib", ".dblib")):
             out += [f"{part.get('designator')} {m.get('type')} {m.get('name')}" for m in part.get("models", [])
-                    if not m.get("use_component_library")]
+                    if not m.get("use_component_library") and not m.get("library_path")]
     return out
 
 

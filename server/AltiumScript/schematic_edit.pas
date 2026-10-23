@@ -493,7 +493,10 @@ begin
     EdRegister(Obj);
 end;
 
-procedure EdSetModel(Comp: ISch_Component; Footprint: String);
+// The footprint model: the first PCBLIB model renamed, or a new one. Location, the full path of a PcbLib, is for a
+// part without a database row: the model takes the footprint from that library by path, not from the component
+// library, which has no row to give it (the ECO reported Footprint Not Found, dss-r0-aiv CTRL, 2026-10-24).
+procedure EdSetModel(Comp: ISch_Component; Footprint: String; Location: String);
 var
     Iter : ISch_Iterator;
     Impl : ISch_Implementation;
@@ -510,7 +513,8 @@ begin
         begin
             Impl.ModelName := Footprint;
             Impl.ClearAllDatafileLinks;
-            Impl.AddDataFileLink(Footprint, '', 'PCBLib');
+            Impl.AddDataFileLink(Footprint, Location, 'PCBLib');
+            if (Location <> '') then Impl.UseComponentLibrary := False;
             Impl.IsCurrent := True;
             Done := True;
         end;
@@ -522,16 +526,17 @@ begin
         Impl := Comp.AddSchImplementation;
         Impl.ModelName := Footprint;
         Impl.ModelType := 'PCBLIB';
-        Impl.AddDataFileLink(Footprint, '', 'PCBLib');
+        Impl.AddDataFileLink(Footprint, Location, 'PCBLib');
         Impl.IsCurrent := True;
-        Impl.UseComponentLibrary := True;
+        Impl.UseComponentLibrary := (Location = '');
     end;
 end;
 
 // Every model of a part linked to an IntLib or DbLib taken from that library ("Use Component Library"), as a
 // hand-placed part's are. A copy out of a SchLib keeps the symbol's models on "any library", and the ECO then
 // searches every installed library for each one: the raw-head adapter's ECO ran 40 minutes and froze Altium.
-procedure EdBindModels(Comp: ISch_Component);
+// The footprint given a library path (Location) keeps it.
+procedure EdBindModels(Comp: ISch_Component; Footprint: String; Location: String);
 var
     Iter : ISch_Iterator;
     Impl : ISch_Implementation;
@@ -544,17 +549,20 @@ begin
     Impl := Iter.FirstSchObject;
     while (Impl <> nil) do
     begin
-        Impl.UseComponentLibrary := True;
+        if (Location = '') or (UpperCase(Impl.ModelType) <> 'PCBLIB') or (Impl.ModelName <> Footprint) then
+            Impl.UseComponentLibrary := True;
         Impl := Iter.NextSchObject;
     end;
     Comp.SchIterator_Destroy(Iter);
 end;
 
-// The part's models as read back: [{type, name, current, use_component_library}]
+// The part's models as read back: [{type, name, current, use_component_library, library_path}]; library_path is
+// the first data file link's location, empty on "any library" or the component library
 function EdModels(Comp: ISch_Component): String;
 var
     Iter : ISch_Iterator;
     Impl : ISch_Implementation;
+    Path : String;
 begin
     Result := '';
     Iter := Comp.SchIterator_Create;
@@ -562,17 +570,21 @@ begin
     Impl := Iter.FirstSchObject;
     while (Impl <> nil) do
     begin
+        Path := '';
+        if (Impl.DatafileLinkCount > 0) then Path := Impl.DatafileLink[0].Location;
         if (Result <> '') then Result := Result + ', ';
         Result := Result + '{"type": "' + JSONEscapeString(Impl.ModelType) + '", "name": "' +
                   JSONEscapeString(Impl.ModelName) + '", "current": ' + EdBool(Impl.IsCurrent) +
-                  ', "use_component_library": ' + EdBool(Impl.UseComponentLibrary) + '}';
+                  ', "use_component_library": ' + EdBool(Impl.UseComponentLibrary) +
+                  ', "library_path": "' + JSONEscapeString(Path) + '"}';
         Impl := Iter.NextSchObject;
     end;
     Comp.SchIterator_Destroy(Iter);
 end;
 
-// LINK fields: link_library|db_table|design_item|footprint|comment starting at field F
-procedure EdSetLink(Comp: ISch_Component; Rec: String; F: Integer);
+// LINK fields: link_library|db_table|design_item|footprint|comment starting at field F; the footprint's library
+// path in field L, empty in a spec without it
+procedure EdSetLink(Comp: ISch_Component; Rec: String; F: Integer; L: Integer);
 begin
     if (GetFieldFromPipeString(Rec, F) <> '') then Comp.SourceLibraryName := GetFieldFromPipeString(Rec, F);
     if (GetFieldFromPipeString(Rec, F + 1) <> '') then
@@ -581,9 +593,9 @@ begin
         Comp.UseDBTableName := True;
     end;
     if (GetFieldFromPipeString(Rec, F + 2) <> '') then Comp.DesignItemId := GetFieldFromPipeString(Rec, F + 2);
-    EdSetModel(Comp, GetFieldFromPipeString(Rec, F + 3));
+    EdSetModel(Comp, GetFieldFromPipeString(Rec, F + 3), GetFieldFromPipeString(Rec, L));
     if (GetFieldFromPipeString(Rec, F + 4) <> '') then Comp.Comment.Text := GetFieldFromPipeString(Rec, F + 4);
-    EdBindModels(Comp);
+    EdBindModels(Comp, GetFieldFromPipeString(Rec, F + 3), GetFieldFromPipeString(Rec, L));
 end;
 
 procedure EdSetParam(Comp: ISch_Component; PName: String; PVal: String);
@@ -1198,7 +1210,7 @@ begin
                 if not EdPut(Comp, StrToInt(GetFieldFromPipeString(Rec, 4)), StrToInt(GetFieldFromPipeString(Rec, 5)),
                              StrToInt(GetFieldFromPipeString(Rec, 6)), StrToInt(GetFieldFromPipeString(Rec, 7))) then
                     EdError(Rec, 'no clear spot within 10 inches to the right; placed overlapping');
-                EdSetLink(Comp, Rec, 8);
+                EdSetLink(Comp, Rec, 8, 14);
                 EdFinishPart(Comp, Spec, i, Rec);
             end;
         end
@@ -1231,7 +1243,7 @@ begin
                 EdRemove(Old);
                 if not EdPut(Comp, X, Y, Orient, Mirror) then
                     EdError(Rec, 'no clear spot within 10 inches to the right; placed overlapping');
-                EdSetLink(Comp, Rec, 6);
+                EdSetLink(Comp, Rec, 6, 11);
                 EdFinishPart(Comp, Spec, i, Rec);
             end;
         end
@@ -1246,7 +1258,7 @@ begin
             else
             begin
                 EdBeginModify(Comp);
-                EdSetLink(Comp, Rec, 2);
+                EdSetLink(Comp, Rec, 2, 7);
                 EdEndModify(Comp);
                 EdFinishPart(Comp, Spec, i, Rec);
             end;
