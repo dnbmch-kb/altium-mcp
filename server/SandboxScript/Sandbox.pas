@@ -44,7 +44,23 @@ begin
 
     try
         // === BEGIN EXPERIMENT (rewritten by the run_altium_script tool) ===
-        SandboxLog('no script loaded');
+        Obj1 := GetWorkspace.DM_GetProjectFromPath('C:\Projects\laser-calib\hw\raw_head_adapter\raw_head_adapter.PrjPcb');
+        SandboxLog('project ' + Obj1.DM_ProjectFullPath);
+        List1 := TStringList.Create;
+        For I1 := 0 To Obj1.DM_LogicalDocumentCount - 1 Do
+        Begin
+          S1 := Obj1.DM_LogicalDocuments(I1).DM_FullPath;
+          If Pos('TEMPMODUL', UpperCase(S1)) > 0 Then List1.Add(S1);
+        End;
+        SandboxLog('found ' + IntToStr(List1.Count));
+        For I1 := 0 To List1.Count - 1 Do
+        Begin
+          Obj1.DM_RemoveSourceDocument(List1[I1]);
+          SandboxLog('removed ' + List1[I1]);
+        End;
+        S2 := '';
+        For I1 := 0 To Obj1.DM_LogicalDocumentCount - 1 Do S2 := S2 + ExtractFileName(Obj1.DM_LogicalDocuments(I1).DM_FullPath) + '; ';
+        ResultText := 'removed ' + IntToStr(List1.Count) + '; now: ' + S2;
         // === END EXPERIMENT ===
     except
         SandboxLog('EXCEPTION escaped the script body');
