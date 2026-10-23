@@ -2315,6 +2315,17 @@ async def check_placement(ctx: Context, cmp_designators: list = None, clearance_
     logger.info(f"Placement check complete: {result.get('violation_count', '?')} violations")
     return json.dumps(result, indent=2)
 
+PW_RENDERFULLCONTENT = 2      # PrintWindow: render through DWM, DirectX content included (Windows 8.1+)
+
+
+def canvas_colours(img, most=16) -> int:
+    """Distinct colours in the middle 40 % of a window capture (up to most + 1): a painted PCB or schematic view
+    has many, an unpainted canvas one or two."""
+    w, h = img.size
+    colours = img.crop((int(w * 0.3), int(h * 0.3), int(w * 0.7), int(h * 0.7))).getcolors(maxcolors=most)
+    return most + 1 if colours is None else len(colours)
+
+
 @mcp.tool()
 async def get_screenshot(ctx: Context, view_type: str = "pcb", zoom_to: list = None):
     """
@@ -2471,38 +2482,42 @@ async def get_screenshot(ctx: Context, view_type: str = "pcb", zoom_to: list = N
                 # A freshly switched-to document needs a moment to render.
                 time.sleep(1.0)
 
-                # Measure AFTER activation: restoring or switching can change
-                # the frame's size.
+                # Measure AFTER activation (restoring or switching can change the
+                # frame's size), in physical pixels: Altium is DPI-aware, and a
+                # DPI-unaware caller gets a scaled rectangle that crops the capture
+                import ctypes
+                user32 = ctypes.windll.user32
+                user32.SetThreadDpiAwarenessContext.restype = ctypes.c_void_p
+                previous_dpi = user32.SetThreadDpiAwarenessContext(ctypes.c_void_p(-4))   # per monitor v2
                 left, top, right, bottom = win32gui.GetWindowRect(hwnd)
                 width = right - left
                 height = bottom - top
                 if width < 200 or height < 150:
+                    user32.SetThreadDpiAwarenessContext(ctypes.c_void_p(previous_dpi))
                     result_queue.put({"success": False, "error": f"Altium window is too small to capture ({width}x{height}); is it minimized?"})
                     return
-                
-                # Take screenshot using GDI functions instead of ImageGrab
+
+                # The window rendered through the compositor: PrintWindow with
+                # PW_RENDERFULLCONTENT includes what Altium presents with DirectX
+                # (the PCB canvas), which BitBlt from the window DC never holds
                 try:
-                    # Get device context
                     hwndDC = win32gui.GetWindowDC(hwnd)
                     mfcDC = win32ui.CreateDCFromHandle(hwndDC)
                     saveDC = mfcDC.CreateCompatibleDC()
-                    
-                    # Create a bitmap object
                     saveBitMap = win32ui.CreateBitmap()
                     saveBitMap.CreateCompatibleBitmap(mfcDC, width, height)
                     saveDC.SelectObject(saveBitMap)
-                    
-                    # Copy the screen into the bitmap
-                    saveDC.BitBlt((0, 0), (width, height), mfcDC, (0, 0), win32con.SRCCOPY)
-                    
-                    # Convert the bitmap to an Image
+                    rendered = user32.PrintWindow(hwnd, saveDC.GetSafeHdc(), PW_RENDERFULLCONTENT)
+                    user32.SetThreadDpiAwarenessContext(ctypes.c_void_p(previous_dpi))
+                    if not rendered:
+                        raise OSError("PrintWindow could not render the Altium window")
                     bmpinfo = saveBitMap.GetInfo()
                     bmpstr = saveBitMap.GetBitmapBits(True)
                     img = Image.frombuffer(
                         'RGB',
                         (bmpinfo['bmWidth'], bmpinfo['bmHeight']),
                         bmpstr, 'raw', 'BGRX', 0, 1)
-                    
+
                     # Save a local copy of the screenshot for debugging (non-fatal if it fails)
                     try:
                         debug_filename = str(MCP_DIR / f"screenshot_{view_type}.png")
@@ -2533,6 +2548,7 @@ async def get_screenshot(ctx: Context, view_type: str = "pcb", zoom_to: list = N
                         "window_class": window["class_name"],
                         "view_type": view_type,
                         "foreground_confirmed": activated,
+                        "canvas_colours": canvas_colours(img),
                         "image_format": "PNG",
                         "encoding": "base64",
                         "debug_file": debug_filename,
@@ -2595,6 +2611,10 @@ async def get_screenshot(ctx: Context, view_type: str = "pcb", zoom_to: list = N
         # What was actually captured, as opposed to what was requested
         result["captured_kind"] = focused_kind or None
         result["captured_document"] = focused_document or None
+        if result["canvas_colours"] <= 2:
+            result["success"] = False
+            result["error"] = ("the canvas in the middle of the window is one colour: Altium has not painted the view "
+                               "(not shown on screen, or a view this capture cannot reach); the image is attached")
         return [
             json.dumps(result),
             MCPImage(data=base64.b64decode(image_base64), format="png"),
