@@ -297,10 +297,19 @@ begin
     EdRegister(Obj);
 end;
 
-// A pin's connection, left for the plan: the part by its object address, the pin's electrical end and direction
+// A part's key for the plan: designator and location, which EdPut keeps apart. Not I_ObjectAddress, which AD25's
+// IntToStr cannot convert (the script paused there, 2026-10-23), nor UniqueId, which every copy of one library
+// symbol shares until the next load
+function EdKey(Comp: ISch_Component): String;
+begin
+    Result := '"' + JSONEscapeString(Comp.Designator.Text + '@' + IntToStr(CoordToMils(Comp.Location.X)) + ',' +
+              IntToStr(CoordToMils(Comp.Location.Y))) + '"';
+end;
+
+// A pin's connection, left for the plan: the part by its key, the pin's electrical end and direction
 procedure EdPend(Comp: ISch_Component; PinDes: String; Net: String; X, Y, D: Integer);
 begin
-    EdPending.Add('[' + IntToStr(Comp.I_ObjectAddress) + ', "' + JSONEscapeString(PinDes) + '", "' +
+    EdPending.Add('[' + EdKey(Comp) + ', "' + JSONEscapeString(PinDes) + '", "' +
                   JSONEscapeString(Net) + '", ' + IntToStr(X) + ', ' + IntToStr(Y) + ', ' + IntToStr(D) + ']');
 end;
 
@@ -395,7 +404,7 @@ begin
     end;
     Comp.SchIterator_Destroy(Iter);
 
-    Result := '{"key": ' + IntToStr(Comp.I_ObjectAddress) + ', "uid": "' + Comp.UniqueId +
+    Result := '{"key": ' + EdKey(Comp) + ', "uid": "' + Comp.UniqueId +
               '", "designator": "' + JSONEscapeString(Comp.Designator.Text) +
               '", "body": [' + Body + '], "pins": [' + Pins + '], "texts": [' + Texts + ']}';
 end;
