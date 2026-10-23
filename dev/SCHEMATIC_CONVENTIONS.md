@@ -2,7 +2,10 @@
 
 Rules for programmatic schematic generation, each one learned by getting it
 wrong and having a PCB designer point at the result. An agent that follows
-these should not repeat the mistakes.
+these should not repeat the mistakes. How a finished house sheet looks, measured
+from the operator's SCB, ToF master and Phytec carrier, is [`schematic_style.md`](../../%23Notes/guides/schematic_style.md)
+(c:/Projects/#Notes/guides/schematic_style.md); sections 3, 4, 7, 9, 14 and 15
+here follow it.
 
 Tooling: a circuit spec (part data from
 [`make_part_spec.py`](make_part_spec.py)) →
@@ -43,25 +46,29 @@ All of a symbol's pins on one side usually share an x. A vertical wire in that
 column passes through every one of them on its way past. Offset risers by at
 least 100 mil, and prefer 200–300 for readability.
 
-## 3. Leave a wire between a pin and a node
+## 3. A rail runs through a capacitor's top pin
 
-A junction sitting directly on a pin is bad practice. Place shunt parts one
-grid *below* the rail they tap, so there is a short wire between the pin and
-the junction:
+A shunt capacitor stands vertical on the rail it serves, and the rail runs
+through its top pin end with no stub between (the SCB does it for 25 of 32
+vertical capacitors, the ToF master 21 of 29; style guide section 6). The tap
+gap of one grid stays only where a rail cannot pass the pin, and a junction sits
+directly on a pin only at such a tee:
 
 ```
-rail  ────────┬────────         tap gap = 1 grid (100 mil)
-              │
-           ┌──┴──┐  C1 top pin
+rail  ──────┬──────┬──────      the rail through C1's and C2's top pin ends
+           C1     C2            400 mil apart
+            ┴      ┴            GND port on each bottom pin
 ```
 
-Tight-packing onto the pin is acceptable only when fitting a dense sheet,
-which is rare.
+## 4. Ground is one grid across, one grid down; a capacitor row grounds at the bottom
 
-## 4. Ground is one grid across, one grid down
+Not three. `U1.GND → 100 left → 100 down → GND port`.
 
-Not three. `U1.GND → 100 left → 100 down → GND port`. Shunt parts drop
-100 mil from their bottom pin to their own port.
+A row of capacitors on a rail stands vertical, 400 mil apart (the median over
+every adjacent pair in the house sheets), the first 450-550 mil from the IC
+body, inputs left of a regulator and outputs right of it. Each grounds at its
+bottom pin: either a GND port right on the pin (ToF 15, SCB 8, MCB 9), or one
+short GND wire under the row to a single port (ToF 11, SCB 10).
 
 ## 5. Rails belong next to the pins they serve
 
@@ -94,22 +101,26 @@ occupy. `check_connectivity.pas` now tests every axis-aligned segment against
 each component's DRAWN body (graphics only - wires legitimately end on pins,
 which stick out past the body).
 
-## 7. Power ports: harvest the style, and leave room for the label
-
-Do not guess between the ground symbols. Read what the house style uses from a
-real sheet (`ePowerGndPower`=4, `ePowerGndSignal`=5, `ePowerGndEarth`=6 are
-easy to confuse, and the wrong one looks plausible):
+## 7. Power ports: GND is power ground with its name hidden
 
 | Net | Style | Orientation | ShowNetName |
 |---|---|---|---|
-| GND | **5** `ePowerGndSignal` — digital ground | 3 (down) | False |
+| GND | **4** power ground | 3 (down) | False |
+| another ground net (GND_ISO, ...) | 4 | 3 (down) | True |
 | supply rails | **2** `ePowerBar` | 1 (up) | True |
 
-**`ShowNetName := False` does not hide the label.** It reads back as False and
-Altium still draws "GND" below the symbol. So a ground port always occupies
-roughly 300 mil below itself, and **no wire may be routed through that band** —
-the label crowds it and looks like a connection. Either move the part clear of
-the run, or drop the crossing wire further away.
+Measured in the house sheets (style guide section 5): power ground pointing
+down with no name on 27 SCB, 40 ToF, 28 MCB and 73 Elkbox ports; a supply is a
+bar pointing up with its name, 32 of 32 on both the SCB and the ToF master. A
+port never points sideways: a power pin pointing the other way gets a jog
+beside it, or a label. `ePowerGndPower`=4, `ePowerGndSignal`=5 and
+`ePowerGndEarth`=6 are easy to confuse, and the wrong one looks plausible.
+
+On style 5, `ShowNetName := False` read back False and Altium still drew "GND"
+below the symbol, so a style-5 ground occupied about 300 mil below itself. The
+ToF master's print shows style-4 ports with no text; whether the script's
+`ShowNetName := False` hides the name on style 4 is the live check to run
+before relying on it.
 
 ## 8. Net labels must touch the wire
 
@@ -121,7 +132,7 @@ Caveat: that proves the geometric precondition, not the compiled net name.
 Confirming the net Altium actually assigns needs the project compiled, which a
 free document cannot do.
 
-## 9. Parameter text: harvest it, do not invent it
+## 9. Parameter text: harvest it, or use the house offsets
 
 Placement is an offset from the component's `Location`, plus `Justification`
 and `Orientation` — the method in the user's `CopyParamPlacement.pas`.
@@ -137,7 +148,22 @@ PLACE|CAP-NP|1|DESIGNATOR|0|300|2|0      # dx, dy, justification, orientation
 PLACE|CAP-NP|1|VALUE|0|200|2|0
 ```
 
-Treat the harvested numbers as relative **spacing**, then translate the block:
+For a library with no harvest, the house offsets are the defaults (style guide
+section 8; all text Times New Roman 10, bottom-left justified, horizontal even on
+a rotated part):
+
+| Part | Designator | Second line |
+|---|---|---|
+| two-pin, vertical | a two-line block starting 10 mil right of the body, the upper baseline on the part's centre line + 10 | 100 mil below the upper line |
+| two-pin, horizontal | baseline 10 mil above the body, flush with its left end | value, baseline 110 mil below the body |
+| IC, module, connector | the body's top-left corner, baseline on the top edge | the MPN comment, flush left, baseline 100 mil below the body |
+
+**Visible parameters:** a resistor, capacitor, inductor or ferrite shows its
+value only; every other part shows its comment, the MPN. `DNP` shows as a further
+line where it applies; everything else (part number, tolerance, manufacturer,
+the composed comment such as "CAP 0.10µF 25V 0402") stays hidden.
+
+Treat harvested numbers as relative **spacing**, then translate the block:
 
 - **Clear the body.** Applied raw, a right-justified column anchors at the
   component origin, which for `CAP-NP` is over the plates.
@@ -201,25 +227,54 @@ through* is two, a pin landing there is one more.
 
 ## 13. A connection goes on the pin's side and touches nothing
 
-`edit_schematic` drew every label left-justified at its stub end and every power port by its net's fixed
-direction, whatever way the pin pointed: on a left pin the label ran back over the pins and the body, JP1's
-ground port fell onto a label 100 mil below, and the raw-head adapter's 56-part sheet counted 214 overlaps
-(laser-calib `hw/raw_head_adapter/altium_native/sheet.py`, 2026-10-23). It now places each connection from
-the placed symbols, as Altium reports them after placement (`server/sheet_plan.py`):
+`edit_schematic` drew every label left-justified at a 100 mil stub end and every power port by its net's
+fixed direction, whatever way the pin pointed: on a left pin the label ran back over the pins and the body,
+JP1's ground port fell onto a label 100 mil below, and the raw-head adapter's 56-part sheet counted 214
+overlaps (laser-calib `hw/raw_head_adapter/altium_native/sheet.py`, 2026-10-23). It now places each pin's
+connection from the placed symbols, as Altium reports them after placement (`server/sheet_plan.py`), in the
+house style (style guide section 4):
 
 | Pin | Drawn |
 |---|---|
-| signal, pointing right | 100 mil stub, label left-justified at its end |
-| signal, pointing left | stub, label **right-justified** at its end, so it runs away from the body |
-| signal, pointing up / down | stub, label turned 90 degrees, reading up from the end / ending at it |
-| power | port the conventional way (supply up, ground down) or the pin's way, at the stub end, 200 or 400 mil further out, the first that touches no body, pin or text; else a label |
+| signal, pointing right | stub of 60 mil a character + 200; a horizontal label starting 100 mil out, along the stub |
+| signal, pointing left | the same stub; the label at its far end, the text running back toward the pin |
+| signal, pointing up / down | 100 mil stub, the label horizontal at its end |
+| power, pointing the port's way or sideways | at the stub end, 200 or 400 mil further out: a supply up, ground down, the first that touches no body, pin or text; else a label |
+| power, pointing against the port's way | a jog of 200 or 300 mil beside the pin, the port at its end pointing the right way |
 | neighbouring pins of one part on one power net (100 mil apart, one line) | one stub each, one shared wire, a junction at each inner end, one port |
-| a sideways power pin with another pin of its side within 150 mil | a label: no room for a port |
 
-Nothing new may touch a pin end, wire, label or port of another connection: that joins two nets, so such a spot
-is never drawn (a signal tries the longer stubs, then the op is reported). Text extents are estimates (90 mil
-high, 70 mil a character); the result's `connections` carries every box and `overlaps` names what still
-touches, for the caller to check against the saved sheet.
+A port never points sideways. Nothing new may touch a pin end, wire, label or port of another connection: that
+joins two nets, so such a spot is never drawn and the op is reported. Text extents are estimates (90 mil high,
+70 mil a character; a port glyph's box reaches 10 mil past it, so a glyph ending on a wire counts as touching);
+the result's `connections` carries every box and `overlaps` names what still touches.
+
+## 14. Layout
+
+From the house sheets (style guide sections 1-3):
+
+- **One sheet per board**; a further sheet only for a repeated channel, drawn once.
+- **Titled blocks.** Each functional block has a title (Roboto 14 or Times 12, bold underlined) 100-200 mil
+  above it, flush with its left edge; titles in one row share a baseline.
+- **Power on top**, the supply chain reading left to right; interfaces and I/O below; output connectors down
+  the right edge.
+- **In left, out right; supply above, ground below.** Inside a block the input or controller side is on the
+  left and the output or connector side on the right.
+- **Spacing.** The median gap from a part to its nearest neighbour is 220-300 mil; capacitors on a rail 400 mil
+  apart; blocks side by side 400-600 mil apart, stacked ones 300-850 with the title in the gap.
+- **The sheet is sized to the drawing**, with no empty area larger than about a tenth of it.
+- **Template:** snap 50 mil, visible grid 100 mil, hotspot 20 mil (`build_schematic` sets it on a new sheet).
+
+## 15. Wiring
+
+- **Wires inside a block** (the `wire` op, from pin end to pin end through given corners): in the house
+  sheets 41-57 % of all pins sit on a wire reaching another part's pin. Wires are orthogonal and short.
+- **Labels only across blocks.** A label hop spans the sheet (median 5850-7200 mil); a label joining two pins a
+  short wire apart is a wire drawn as a label. Each label sits on a stub sized to its text (section 13).
+- **Junctions only at tees**, never a four-way, at most two crossings without one.
+- **Each block takes its supplies from power ports** (the `port` op places one at a chosen point with its own
+  orientation), not from a wire run across from another block.
+- **Ports appear only on child sheets.** Every `_P`/`_N` pair takes a Differential Pair directive; every open
+  pin a No-ERC marker.
 
 ## DelphiScript hazards that bit repeatedly
 

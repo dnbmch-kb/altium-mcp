@@ -31,16 +31,16 @@ class EditSpecTest(unittest.TestCase):
     def test_header_names_the_sheet_and_the_power_nets_and_saves_last(self):
         lines = self.spec([{"op": "delete", "uid": "ABCD"}], power_nets=["3V3_SW", "GND_ISO"])
         self.assertEqual(lines[0], f"SHEET|{self.sheet}")
-        self.assertIn("POWERNET|3V3_SW|2|1", lines)       # supply bar, up
-        self.assertIn("POWERNET|GND_ISO|5|3", lines)      # ground, down
-        self.assertIn("POWERNET|GND|5|3", lines)          # always
+        self.assertIn("POWERNET|3V3_SW|2|1|1", lines)       # supply bar, up
+        self.assertIn("POWERNET|GND_ISO|4|3|1", lines)      # another ground: power ground, down, name shown
+        self.assertIn("POWERNET|GND|4|3|0", lines)          # always: power ground, down, name hidden
         self.assertEqual(lines[-1], "SAVE")
         self.assertNotIn("SAVE", self.spec([{"op": "delete", "uid": "ABCD"}], save=False))
 
     def test_a_power_net_pin_carries_its_port_style_a_signal_pin_none(self):
         lines = self.spec([{"op": "attach_pin", "comp": "uid:Q1", "pin": "2", "net": "GND"},
                            {"op": "attach_pin", "comp": "des:R5", "pin": "1", "net": "SW_PC"}])
-        self.assertIn("ATTACH|uid:Q1|2|GND|5|3", lines)
+        self.assertIn("ATTACH|uid:Q1|2|GND|4|3", lines)
         self.assertIn("ATTACH|des:R5|1|SW_PC|-1|-1", lines)
 
     def test_place_writes_its_link_fields_pins_and_closes_with_end(self):
@@ -69,13 +69,13 @@ class EditSpecTest(unittest.TestCase):
         op["nets"] = {"1": "5V", "2": "GND"}
         lines = self.spec([op])
         self.assertIn("MAP|2|1|5V|2|1", lines)            # old cathode 2 -> new cathode 1
-        self.assertIn("MAP|1|2|GND|5|3", lines)
+        self.assertIn("MAP|1|2|GND|4|3", lines)
 
     def test_several_old_pins_onto_one_new_pin_stub_it_once(self):
         lines = self.spec([{"op": "replace", "comp": "des:U1", "symbol_library": str(self.lib), "lib_ref": "MOD",
                             "pin_map": {"49_1": "49", "49_2": "49"}, "nets": {"49": "GND"}}])
-        self.assertIn("MAP|49_1|49|GND|5|3", lines)
-        self.assertIn("MAPOLD|49_2|49|GND|5|3", lines)
+        self.assertIn("MAP|49_1|49|GND|4|3", lines)
+        self.assertIn("MAPOLD|49_2|49|GND|4|3", lines)
 
     def test_replace_connects_extra_new_pins_and_marks_no_erc(self):
         lines = self.spec([{"op": "replace", "comp": "des:IC3", "symbol_library": str(self.lib), "lib_ref": "TPS7A2633DRVR",
@@ -98,7 +98,7 @@ class EditSpecTest(unittest.TestCase):
         self.assertIn("DELCOMP|X1|0|", lines)
 
     def test_label_to_port_takes_the_power_style(self):
-        self.assertIn("LABEL_TO_PORT|PZWFJNSF|3V3|2|1", self.spec([{"op": "label_to_port", "uid": "PZWFJNSF", "text": "3V3"}]))
+        self.assertIn("LABEL_TO_PORT|PZWFJNSF|3V3|2|1|1", self.spec([{"op": "label_to_port", "uid": "PZWFJNSF", "text": "3V3"}]))
 
     def test_entry_and_relink_and_no_erc(self):
         lines = self.spec([{"op": "attach_entry", "symbol": "RS422_RX", "entry": "DI", "net": "GND"},
@@ -106,7 +106,7 @@ class EditSpecTest(unittest.TestCase):
                             "db_table": "Panasonic_ERJ_0402", "design_item": "ERJ-2RKF1002X", "footprint": "SMD-0402-RES",
                             "comment": "10k"},
                            {"op": "no_erc_pins", "comp": "des:U1", "pins": ["32", "33"]}])
-        self.assertIn("ENTRY|RS422_RX|DI|GND|5|3", lines)
+        self.assertIn("ENTRY|RS422_RX|DI|GND|4|3", lines)
         self.assertIn("RELINK|uid:LRAKJBWM|Res-Gen.DbLib|Panasonic_ERJ_0402|ERJ-2RKF1002X|SMD-0402-RES|10k", lines)
         self.assertEqual(lines[lines.index("RELINK|uid:LRAKJBWM|Res-Gen.DbLib|Panasonic_ERJ_0402|ERJ-2RKF1002X|SMD-0402-RES|10k") + 1], "END")
         self.assertIn("NOERC|des:U1|32", lines)
@@ -248,7 +248,7 @@ class TwoPassTest(unittest.TestCase):
         first, second = self.specs
         self.assertEqual(first[-1], "GEOMETRY")
         self.assertNotIn("SAVE", first)
-        self.assertEqual(second, [f"SHEET|{self.sheet}", "WIRE|1000|1100|900|1100", "LABEL|900|1100|0|2|SDA", "SAVE"])
+        self.assertEqual(second, [f"SHEET|{self.sheet}", "WIRE|1000|1100|600|1100", "LABEL|600|1100|0|0|SDA", "SAVE"])
         self.assertTrue(r["success"], r)
         self.assertEqual(r["saved"], str(self.sheet))
         self.assertEqual(r["connections"][0]["kind"], "label")

@@ -6,9 +6,12 @@ Coordinates are mils. A component is referenced as "uid:XXXXXXXX" (its UNIQUEID)
 """
 from pathlib import Path
 
-DEFAULT_POWER = {"GND": (5, 3), "3V3": (2, 1), "5V": (2, 1)}   # net -> (port style, orientation)
-SUPPLY_STYLE = (2, 1)                                          # bar, pointing up
-GROUND_STYLE = (5, 3)                                          # signal ground, pointing down
+# net -> (port style, orientation, name shown), the house sheets (#Notes/guides/schematic_style.md section 5):
+# GND is power ground (4) pointing down with its name hidden, a supply a bar (2) pointing up with its name shown
+DEFAULT_POWER = {"GND": (4, 3, False), "3V3": (2, 1, True), "5V": (2, 1, True)}
+SUPPLY_STYLE = (2, 1, True)
+GROUND_STYLE = (4, 3, True)                                    # another ground net keeps its name
+DRAW_OPS = ("wire", "junction", "port")                        # drawn in the second pass, from the reported pins
 CONNECTIONS = ("PIN", "MAP", "ATTACH")                         # spec lines whose connection sheet_plan places
 
 _REQUIRED = {
@@ -25,6 +28,9 @@ _REQUIRED = {
     "replace": ("comp", "symbol_library", "lib_ref", "pin_map"),
     "relink": ("comp",),
     "attach_entry": ("symbol", "entry", "net"),
+    "wire": ("points",),
+    "junction": ("at",),
+    "port": ("net", "at", "orient"),
 }
 
 
@@ -70,8 +76,50 @@ def power_table(power_nets=None):
 def _net_line(kind, pin, net, power):
     pin = "|".join(_text(p, "pin") for p in str(pin).split("|"))
     net = _text(net, f"net of pin {pin}")
-    style, orient = power.get(net, (-1, -1))
+    style, orient, _ = power.get(net, (-1, -1, True))
     return f"{kind}|{pin}|{net}|{style}|{orient}"
+
+
+def _point(p, what):
+    """A drawing op's point: [x, y] in mils or {"comp": "uid:..."|"des:...", "pin": name}, checked."""
+    if isinstance(p, dict):
+        if "comp" not in p or "pin" not in p:
+            raise ValueError(f"{what}: a pin point needs comp and pin: {p!r}")
+        return {"comp": _comp(p["comp"], what + " comp"), "pin": _text(p["pin"], what + " pin")}
+    if not isinstance(p, (list, tuple)) or len(p) != 2:
+        raise ValueError(f"{what}: a point is [x, y] or {{comp, pin}}: {p!r}")
+    return [int(_int(p[0], what + " x")), int(_int(p[1], what + " y"))]
+
+
+def draw_ops(ops):
+    """The wire, junction and port ops, checked, in order: edit_spec leaves them out, the second pass draws them
+    once the pins they name are known."""
+    out = []
+    for i, op in enumerate(ops):
+        kind = op.get("op")
+        if kind not in DRAW_OPS:
+            continue
+        what = f"op {i} ({kind})"
+        for key in _REQUIRED[kind]:
+            if key not in op:
+                raise ValueError(f"{what}: missing '{key}'")
+        if kind == "wire":
+            if not isinstance(op["points"], (list, tuple)) or len(op["points"]) < 2:
+                raise ValueError(f"{what}: points needs two or more")
+            out.append({"op": "wire", "points": [_point(p, what) for p in op["points"]],
+                        "junctions": [_point(p, what) for p in op.get("junctions") or ()]})
+        elif kind == "junction":
+            out.append({"op": "junction", "at": _point(op["at"], what)})
+        else:
+            orient = op["orient"]
+            if isinstance(orient, bool) or orient not in (0, 1, 2, 3):
+                raise ValueError(f"{what}: orient is 0 right, 1 up, 2 left or 3 down: {orient!r}")
+            port = {"op": "port", "net": _text(op["net"], what + " net"), "at": _point(op["at"], what),
+                    "orient": orient}
+            if "style" in op:
+                port["style"] = int(op["style"])
+            out.append(port)
+    return out
 
 
 def _link_fields(op, what):
@@ -100,13 +148,16 @@ def edit_spec(sheet, ops, power_nets=None, save=True):
         raise ValueError(f"sheet must be the full path of an existing .SchDoc: {sheet}")
     if not ops:
         raise ValueError("no ops given")
+    draw_ops(ops)
     power = power_table(power_nets)
-    lines = [f"SHEET|{path}"] + [f"POWERNET|{n}|{s}|{o}" for n, (s, o) in power.items()]
+    lines = [f"SHEET|{path}"] + [f"POWERNET|{n}|{s}|{o}|{1 if shown else 0}" for n, (s, o, shown) in power.items()]
     for i, op in enumerate(ops):
         kind = op.get("op")
         what = f"op {i} ({kind})"
         if kind not in _REQUIRED:
             raise ValueError(f"{what}: unknown op; known: {', '.join(sorted(_REQUIRED))}")
+        if kind in DRAW_OPS:
+            continue
         for key in _REQUIRED[kind]:
             if key not in op:
                 raise ValueError(f"{what}: missing '{key}'")
@@ -123,8 +174,8 @@ def edit_spec(sheet, ops, power_nets=None, save=True):
             lines.append(f"PORT_RENAME|{_text(op['uid'], what + ' uid')}|{_text(op['new'], what + ' new')}")
         elif kind == "label_to_port":
             text = _text(op["text"], what + " text")
-            style, orient = power.get(text, SUPPLY_STYLE)
-            lines.append(f"LABEL_TO_PORT|{_text(op['uid'], what + ' uid')}|{text}|{style}|{orient}")
+            style, orient, shown = power.get(text, SUPPLY_STYLE)
+            lines.append(f"LABEL_TO_PORT|{_text(op['uid'], what + ' uid')}|{text}|{style}|{orient}|{1 if shown else 0}")
         elif kind == "attach_pin":
             lines.append(f"ATTACH|{_comp(op['comp'], what + ' comp')}|" + _net_line("X", op["pin"], op["net"], power)[2:])
         elif kind == "detach_pin":

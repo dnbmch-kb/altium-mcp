@@ -2930,21 +2930,23 @@ async def _spec_command(command: str, spec_file: Path, lines: list) -> str:
 
 
 async def _edit_command(sheet: str, ops: list, power_nets: list, save: bool) -> str:
-    """edit_schematic in two passes when it connects pins: the ops run and Altium reports the pins to connect and
-    the sheet (pass 1, nothing saved), sheet_plan places each connection where it touches nothing, pass 2 draws
-    the plan and saves."""
+    """edit_schematic in two passes when it connects pins or draws: the ops run and Altium reports the pins to
+    connect and the sheet (pass 1, nothing saved), sheet_plan resolves the wire, junction and port ops and places
+    each connection where it touches nothing, pass 2 draws it all and saves."""
     try:
         lines = schematic_edit.edit_spec(sheet, ops, power_nets, save=False)
+        draws = schematic_edit.draw_ops(ops)
     except ValueError as e:
         return json.dumps({"success": False, "error": str(e)})
     path = lines[0].split("|", 1)[1]
-    connects = any(line.split("|", 1)[0] in schematic_edit.CONNECTIONS for line in lines)
+    power = schematic_edit.power_table(list(power_nets or []) + [d["net"] for d in draws if d["op"] == "port"])
+    connects = bool(draws) or any(line.split("|", 1)[0] in schematic_edit.CONNECTIONS for line in lines)
     first = await _bridge_spec("edit_schematic", EDIT_SPEC_FILE,
                                lines + (["GEOMETRY"] if connects else ["SAVE"] if save else []))
     geometry, pending = first.pop("geometry", None), first.pop("pending", [])
     errors = first.setdefault("errors", [])
     if connects and geometry is not None:
-        objects = sheet_plan.plan(geometry, pending, schematic_edit.power_table(power_nets))
+        objects = sheet_plan.plan(geometry, pending, power, draws)
         second = await _bridge_spec("edit_schematic", EDIT_SPEC_FILE, sheet_plan.draw_spec(path, objects, save))
         first["saved"] = second.get("saved", "")
         errors += objects["errors"] + second.get("errors", [])
@@ -2988,10 +2990,11 @@ async def edit_schematic(ctx: Context, sheet: str, ops: list, power_nets: list =
     Edit an EXISTING schematic sheet: delete, rename, connect, place and replace parts.
 
     Every connection the tool makes is a short stub out of the pin with a net label or a power port, so it never
-    routes a wire across the sheet. Where it goes is planned from the placed symbols (server/sheet_plan.py): a
-    label on the pin's own side, justified so it runs away from the body; a power port turned and moved out
-    until it touches no body, pin or text, shared by neighbouring pins of one part on one power net, else a label;
-    never a spot that touches another net's pin, wire, label or port. "connections" returns each one's boxes and
+    routes a wire across the sheet; wires inside a block are the wire op's. Where a connection goes is planned
+    from the placed symbols (server/sheet_plan.py, the house style): a horizontal label on a stub sized to its
+    text, at the far end on a left pin; a power port pointing up (supply) or down (ground) only, moved out or
+    jogged beside the pin until it touches no body, pin or text, shared by neighbouring pins of one part on one
+    power net, else a label; never a spot that touches another net's pin, wire, label or port. "connections" returns each one's boxes and
     "overlaps" what still touches. Read the result's "errors": an op that cannot be carried out changes nothing
     and is listed there; the rest still runs. Verify with a connectivity readback of the saved sheet
     (c:/Projects/tools/altium/sch_nets.py), not with the result alone.
@@ -3023,7 +3026,14 @@ async def edit_schematic(ctx: Context, sheet: str, ops: list, power_nets: list =
                                                          gets the same net, so the old wiring keeps it
             {"op": "relink", "comp", "link_library", "db_table", "design_item", "footprint", "comment",
              "parameters": {}}                           changes a part's library link and keeps its symbol
-        power_nets: nets drawn as power ports (GND, 3V3 and 5V always are).
+            {"op": "wire", "points": [P, P, ...], "junctions": [P]}   orthogonal segments through the points; a
+                                                         point P is [x, y] or {"comp": "des:R1", "pin": "2"} (that
+                                                         pin's end); junctions only at tees
+            {"op": "junction", "at": P}
+            {"op": "port", "net", "at": P, "orient": 0-3, "style"}   a power port at a chosen point, its own
+                                                         orientation (style and shown name from the net)
+        power_nets: nets drawn as power ports (GND, 3V3 and 5V always are; GND power ground pointing down with its
+            name hidden, a supply a bar pointing up).
         save: save the sheet afterwards (default true).
 
     Returns:

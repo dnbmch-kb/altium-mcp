@@ -1741,6 +1741,13 @@ begin
         Result := '{"success": false, "error": "target is not a schematic - refusing to build"}';
         Exit;
     end;
+    // The house template (#Notes/guides/schematic_style.md section 1): snap 50, visible grid 100, hotspot 20 mil
+    TargetDoc.SnapGridOn := True;
+    TargetDoc.SnapGridSize := MilsToCoord(50);
+    TargetDoc.VisibleGridOn := True;
+    TargetDoc.VisibleGridSize := MilsToCoord(100);
+    TargetDoc.HotSpotGridOn := True;
+    TargetDoc.HotSpotGridSize := MilsToCoord(20);
 
     // The new sheet's server document, taken while its view is current (the
     // libraries opened below take the focus). A fresh SheetN name can match a

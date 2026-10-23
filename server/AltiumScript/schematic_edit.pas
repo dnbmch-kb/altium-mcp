@@ -18,7 +18,7 @@ var
     EdSheetPath : String;
     EdErrors    : TStringList;
     EdPlaced    : TStringList;
-    EdPower     : TStringList;    // "NET=style,orient"
+    EdPower     : TStringList;    // "NET=style,orient,shown"
     EdPending   : TStringList;    // [part key, "pin", "net", x, y, direction]
     EdGeom      : String;
     EdOps       : Integer;
@@ -220,7 +220,8 @@ begin
     Result := EdTouchAt(X, Y, Skip, False);
 end;
 
-function EdPowerStyle(Net: String; var Style: Integer; var Orient: Integer): Boolean;
+// A power net's port: style, orientation and whether its name shows ("NET=style,orient,shown")
+function EdPowerStyle(Net: String; var Style: Integer; var Orient: Integer; var Shown: Boolean): Boolean;
 var
     S : String;
 begin
@@ -229,7 +230,9 @@ begin
     if Result then
     begin
         Style := StrToInt(Copy(S, 1, Pos(',', S) - 1));
-        Orient := StrToInt(Copy(S, Pos(',', S) + 1, Length(S)));
+        S := Copy(S, Pos(',', S) + 1, Length(S));
+        Orient := StrToInt(Copy(S, 1, Pos(',', S) - 1));
+        Shown := (Copy(S, Pos(',', S) + 1, Length(S)) = '1');
     end;
 end;
 
@@ -237,14 +240,15 @@ procedure EdPlaceNetAt(X, Y, Dir: Integer; Net: String);
 var
     Obj           : ISch_GraphicalObject;
     Style, Orient : Integer;
+    Shown         : Boolean;
 begin
-    if EdPowerStyle(Net, Style, Orient) then
+    if EdPowerStyle(Net, Style, Orient, Shown) then
     begin
         Obj := SchServer.SchObjectFactory(ePowerObject, eCreate_GlobalCopy);
         Obj.Location := Point(MilsToCoord(X), MilsToCoord(Y));
         Obj.Style := Style;
         Obj.Orientation := Orient;
-        Obj.ShowNetName := True;
+        Obj.ShowNetName := Shown;
         Obj.Text := Net;
     end
     else
@@ -271,7 +275,7 @@ begin
     EdRegister(Obj);
 end;
 
-procedure EdPort(X, Y, Orient, Style: Integer; Text: String);
+procedure EdPort(X, Y, Orient, Style: Integer; Shown: Boolean; Text: String);
 var
     Obj : ISch_GraphicalObject;
 begin
@@ -279,7 +283,7 @@ begin
     Obj.Location := Point(MilsToCoord(X), MilsToCoord(Y));
     Obj.Style := Style;
     Obj.Orientation := Orient;
-    Obj.ShowNetName := True;
+    Obj.ShowNetName := Shown;
     Obj.Text := Text;
     EdRegister(Obj);
 end;
@@ -391,7 +395,8 @@ begin
     end;
     Comp.SchIterator_Destroy(Iter);
 
-    Result := '{"key": ' + IntToStr(Comp.I_ObjectAddress) + ', "designator": "' + JSONEscapeString(Comp.Designator.Text) +
+    Result := '{"key": ' + IntToStr(Comp.I_ObjectAddress) + ', "uid": "' + Comp.UniqueId +
+              '", "designator": "' + JSONEscapeString(Comp.Designator.Text) +
               '", "body": [' + Body + '], "pins": [' + Pins + '], "texts": [' + Texts + ']}';
 end;
 
@@ -420,7 +425,7 @@ begin
             else if (Obj.ObjectId = ePowerObject) then
                 Ports.Add('[' + IntToStr(CoordToMils(Obj.Location.X)) + ', ' + IntToStr(CoordToMils(Obj.Location.Y)) +
                           ', ' + IntToStr(Obj.Orientation) + ', ' + IntToStr(Obj.Style) + ', "' +
-                          JSONEscapeString(Obj.Text) + '"]')
+                          JSONEscapeString(Obj.Text) + '", ' + EdBool(Obj.ShowNetName) + ']')
             else
             begin
                 S := '';
@@ -1089,7 +1094,8 @@ begin
         if (Pos('|' + Kind + '|', '|POWERNET|SAVE|GEOMETRY|WIRE|JUNCTION|LABEL|PORT|') = 0) then EdOps := EdOps + 1;
 
         if (Kind = 'POWERNET') then
-            EdPower.Add(GetFieldFromPipeString(Rec, 1) + '=' + GetFieldFromPipeString(Rec, 2) + ',' + GetFieldFromPipeString(Rec, 3))
+            EdPower.Add(GetFieldFromPipeString(Rec, 1) + '=' + GetFieldFromPipeString(Rec, 2) + ',' +
+                        GetFieldFromPipeString(Rec, 3) + ',' + GetFieldFromPipeString(Rec, 4))
         else if (Kind = 'DELETE') then
         begin
             Obj := EdFindUid(GetFieldFromPipeString(Rec, 1));
@@ -1134,7 +1140,8 @@ begin
                 X := CoordToMils(Obj.Location.X);
                 Y := CoordToMils(Obj.Location.Y);
                 EdRemove(Obj);
-                EdPower.Add(GetFieldFromPipeString(Rec, 2) + '=' + GetFieldFromPipeString(Rec, 3) + ',' + GetFieldFromPipeString(Rec, 4));
+                EdPower.Add(GetFieldFromPipeString(Rec, 2) + '=' + GetFieldFromPipeString(Rec, 3) + ',' +
+                            GetFieldFromPipeString(Rec, 4) + ',' + GetFieldFromPipeString(Rec, 5));
                 EdPlaceNetAt(X, Y, 1, GetFieldFromPipeString(Rec, 2));
             end;
         end
@@ -1240,7 +1247,7 @@ begin
         else if (Kind = 'PORT') then
             EdPort(StrToInt(GetFieldFromPipeString(Rec, 1)), StrToInt(GetFieldFromPipeString(Rec, 2)),
                    StrToInt(GetFieldFromPipeString(Rec, 3)), StrToInt(GetFieldFromPipeString(Rec, 4)),
-                   GetFieldFromPipeString(Rec, 5))
+                   GetFieldFromPipeString(Rec, 5) = '1', GetFieldFromPipeString(Rec, 6))
         else if (Kind = 'GEOMETRY') then
             EdGeom := EdGeometry(0)
         else if (Kind = 'SAVE') then
