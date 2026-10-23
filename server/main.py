@@ -27,7 +27,7 @@ import base64
 import glob
 import re
 
-from altium_files import read_altium_text, write_altium_text
+from altium_files import ansi_script, read_altium_text, write_altium_text
 from outjob_parser import parse_outjob
 import schematic_edit
 import script_lock
@@ -332,12 +332,9 @@ class AltiumBridge:
             if RESPONSE_FILE.exists():
                 RESPONSE_FILE.unlink()
             
-            # Write the request file with command and parameters
-            with open(REQUEST_FILE, "w") as f:
-                json.dump({
-                    "command": command,
-                    **params  # Include parameters directly in the main JSON object
-                }, f, indent=2)
+            # The request as UTF-8 with a byte-order mark and its text unescaped: LoadFromFile decodes it, so every
+            # value reaches the script as typed, the ones its line parsers take apart (arrays, TrimJSON) included
+            write_altium_text(REQUEST_FILE, json.dumps({"command": command, **params}, indent=2, ensure_ascii=False))
             
             logger.info(f"Wrote request file for command: {command}")
             
@@ -1279,15 +1276,17 @@ async def _run_altium_script(ctx: Context, script: str, timeout_seconds: int = 1
                            "error": f"sandbox project missing at {SANDBOX_DIR}"})
 
     try:
-        src = SANDBOX_PAS.read_text(encoding="utf-8")
+        src = SANDBOX_PAS.read_bytes().decode("mbcs")
         pre, rest = src.split(SANDBOX_BEGIN, 1)
         marker_line, rest = rest.split("\n", 1)
         _, post = rest.split(SANDBOX_END, 1)
         body = "\n".join("        " + ln if ln.strip() else ln
                           for ln in script.strip("\n").splitlines())
-        SANDBOX_PAS.write_text(
-            pre + SANDBOX_BEGIN + marker_line + "\n" + body + "\n        " + SANDBOX_END + post,
-            encoding="utf-8")
+        # Altium reads a script without a byte-order mark in the ANSI code page
+        SANDBOX_PAS.write_bytes(ansi_script(
+            pre + SANDBOX_BEGIN + marker_line + "\n" + body + "\n        " + SANDBOX_END + post))
+    except ValueError as e:
+        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
     except Exception as e:
         return json.dumps({"success": False, "error": f"could not inject script: {e}"})
 

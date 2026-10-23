@@ -58,6 +58,7 @@ from unwedge import unwedge  # noqa: E402
 from capture_window import owner_exe  # noqa: E402
 sys.path.insert(0, str(REPO / "server"))
 import script_lock  # noqa: E402  one script at a time across every tool driving Altium
+from altium_files import ansi_script, read_altium_text  # noqa: E402
 
 
 def _title(hwnd):
@@ -174,15 +175,14 @@ def handle_dialogs():
 
 
 def inject(body: str):
-    src = SANDBOX_PAS.read_text(encoding="utf-8")
+    """Write body into Sandbox.pas in the ANSI code page, the way Altium reads a script (altium_files.ansi_script)."""
+    src = SANDBOX_PAS.read_bytes().decode("mbcs")
     pre, rest = src.split(BEGIN, 1)
     marker_line, rest = rest.split("\n", 1)
     _, post = rest.split(END, 1)
     indented = "\n".join("        " + line if line.strip() else line
                          for line in body.strip("\n").splitlines())
-    SANDBOX_PAS.write_text(
-        pre + BEGIN + marker_line + "\n" + indented + "\n        " + END + post,
-        encoding="utf-8")
+    SANDBOX_PAS.write_bytes(ansi_script(pre + BEGIN + marker_line + "\n" + indented + "\n        " + END + post))
 
 
 PLACEHOLDER = "SandboxLog('no experiment loaded');\nResultText := '{\"ok\": true}';"
@@ -226,13 +226,13 @@ def run(timeout=120, quiet=False):
 
     print("=" * 62)
     if SANDBOX_LOG.exists():
-        lines = SANDBOX_LOG.read_text(encoding="utf-8", errors="replace").splitlines()
+        lines = read_altium_text(SANDBOX_LOG).splitlines()
         print("STEP LOG:")
         for line in lines:
             print("  |", line)
         if SANDBOX_RESULT.exists():
             print("-" * 62)
-            print("RESULT:", SANDBOX_RESULT.read_text(encoding="utf-8", errors="replace")[:3000])
+            print("RESULT:", read_altium_text(SANDBOX_RESULT)[:3000])
             restore()
             return True
         print("-" * 62)
@@ -278,7 +278,7 @@ def restart_altium(wait=180):
     time.sleep(5)
     subprocess.Popen(f'"{config["altium_exe_path"]}"', shell=True)
     # Altium is ready when a sandbox ping actually executes
-    saved = SANDBOX_PAS.read_text(encoding="utf-8")
+    saved = SANDBOX_PAS.read_bytes()
     inject(PING_BODY)
     start = time.time()
     try:
@@ -291,7 +291,7 @@ def restart_altium(wait=180):
         print("  >> Altium did not become ready in time")
         return False
     finally:
-        SANDBOX_PAS.write_text(saved, encoding="utf-8")
+        SANDBOX_PAS.write_bytes(saved)
 
 
 def sandbox(body, timeout, flags):

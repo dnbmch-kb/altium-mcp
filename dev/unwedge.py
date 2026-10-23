@@ -122,7 +122,7 @@ Write-Output 'sent'
 def executor_alive(timeout=45):
     """Prove the executor runs again by having it write a result file."""
     from sandbox_runner import inject, SANDBOX_PAS
-    saved = SANDBOX_PAS.read_text(encoding="utf-8")
+    saved = SANDBOX_PAS.read_bytes()
     try:
         inject("ResultText := '{\"probe\": \"alive\"}';")
         if PROBE_RESULT.exists():
@@ -139,7 +139,7 @@ def executor_alive(timeout=45):
             close_dialogs()
         return False
     finally:
-        SANDBOX_PAS.write_text(saved, encoding="utf-8")
+        SANDBOX_PAS.write_bytes(saved)
 
 
 def unwedge(verbose=True, verify=True):
