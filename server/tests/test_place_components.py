@@ -22,6 +22,12 @@ class ConventionTest(unittest.TestCase):
         for r in (0, 45, 90, 180, 270):
             self.assertEqual(main.side_rotation(main.altium_rotation(r, "bottom"), "bottom"), r)
 
+    def test_the_bottom_angle_altium_takes_at_0_and_180(self):
+        # 90 and 270 cannot tell + 180 from 360 - angle; pad 1 of IC_SOT23_5 read back at 0, 90 and 180 on a
+        # scratch board (2026-10-23): Altium mirrors a bottom part top to bottom, then turns it, so + 180
+        self.assertEqual(main.altium_rotation(0, "bottom"), 180)
+        self.assertEqual(main.altium_rotation(180, "bottom"), 0)
+
 
 class PlaceTest(unittest.TestCase):
     def setUp(self):

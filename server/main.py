@@ -1117,9 +1117,12 @@ async def get_component_pins(ctx: Context, cmp_designators: list) -> str:
              - x/y: absolute pad position (mils, relative to board origin)
              - dx/dy: pad offset from the component origin in the footprint's
                rotation-0 frame. To predict a pad position for a planned
-               placement: mirror dx (dx = -dx) if placing on the bottom layer,
-               rotate (dx, dy) counterclockwise by the planned rotation, then
-               add the planned component x/y.
+               placement: on the bottom negate dy (Altium mirrors a bottom part
+               top to bottom), rotate (dx, dy) counterclockwise by Altium's
+               rotation (the component's "rotation" here), then add the planned
+               component x/y. In place_components' convention (Altium's rotation
+               - 180 on the bottom) that is: negate dx, rotate by the convention's
+               angle (pad 1 read back on a scratch board, 2026-10-23).
              - rotation: the pad's own rotation (NOT the component rotation)
              - net, layer, width, height, shape
     """

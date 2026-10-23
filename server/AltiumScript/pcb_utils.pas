@@ -1684,20 +1684,19 @@ begin
                                 AddJSONNumber(PinProps, 'y', CoordToMils(Pad.y - yorigin));
 
                                 // Pad offset from the component origin in the
-                                // footprint's rotation-0 frame: un-rotate the
-                                // current offset, and un-mirror X for parts on
-                                // the bottom side. Predicted pad position after
-                                // placement = origin + (mirror-x if bottom,
-                                // then rotate CCW by rotation) applied to dx/dy.
+                                // footprint's rotation-0 frame: the current
+                                // offset turned back by the rotation and, on the
+                                // bottom, un-mirrored in Y. Altium sends a part to
+                                // the bottom by mirroring it top to bottom, then
+                                // turns it counter-clockwise by Rotation (pad 1
+                                // read at 0, 90 and 180, 2026-10-23), so a pad
+                                // lands at origin + R(rotation) (dx, -dy) there.
                                 AbsDX := CoordToMils(Pad.x - xorigin) - CompX;
                                 AbsDY := CoordToMils(Pad.y - yorigin) - CompY;
                                 RelDX := AbsDX * Cos(CompRad) + AbsDY * Sin(CompRad);
                                 RelDY := -AbsDX * Sin(CompRad) + AbsDY * Cos(CompRad);
                                 if (Component.Layer = eBottomLayer) then
-                                begin
-                                    RelDX := -(AbsDX * Cos(CompRad) - AbsDY * Sin(CompRad));
-                                    RelDY := AbsDX * Sin(CompRad) + AbsDY * Cos(CompRad);
-                                end;
+                                    RelDY := -RelDY;
                                 // Round away trig noise (0.0001 mil resolution)
                                 RelDX := Round(RelDX * 10000) / 10000;
                                 RelDY := Round(RelDY * 10000) / 10000;
