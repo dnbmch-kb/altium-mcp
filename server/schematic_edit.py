@@ -9,6 +9,7 @@ from pathlib import Path
 DEFAULT_POWER = {"GND": (5, 3), "3V3": (2, 1), "5V": (2, 1)}   # net -> (port style, orientation)
 SUPPLY_STYLE = (2, 1)                                          # bar, pointing up
 GROUND_STYLE = (5, 3)                                          # signal ground, pointing down
+CONNECTIONS = ("PIN", "MAP", "ATTACH")                         # spec lines whose connection sheet_plan places
 
 _REQUIRED = {
     "delete": ("uid",),
@@ -172,6 +173,17 @@ def edit_spec(sheet, ops, power_nets=None, save=True):
     if save:
         lines.append("SAVE")
     return lines
+
+
+def unbound_models(placed):
+    """'R1 PCBLIB RES_0402' for every model of a placed part linked to an IntLib or DbLib that the bridge read back
+    without "Use Component Library": the ECO then searches every installed library for it."""
+    out = []
+    for part in placed:
+        if part.get("library", "").lower().endswith((".intlib", ".dblib")):
+            out += [f"{part.get('designator')} {m.get('type')} {m.get('name')}" for m in part.get("models", [])
+                    if not m.get("use_component_library")]
+    return out
 
 
 def annotate_spec(sheets, assignments, save=True):

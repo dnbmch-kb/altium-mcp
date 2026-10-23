@@ -199,6 +199,28 @@ What the checker distinguishes now:
 Branch counting: a wire *ending* at a point is one branch, a wire *passing
 through* is two, a pin landing there is one more.
 
+## 13. A connection goes on the pin's side and touches nothing
+
+`edit_schematic` drew every label left-justified at its stub end and every power port by its net's fixed
+direction, whatever way the pin pointed: on a left pin the label ran back over the pins and the body, JP1's
+ground port fell onto a label 100 mil below, and the raw-head adapter's 56-part sheet counted 214 overlaps
+(laser-calib `hw/raw_head_adapter/altium_native/sheet.py`, 2026-10-23). It now places each connection from
+the placed symbols, as Altium reports them after placement (`server/sheet_plan.py`):
+
+| Pin | Drawn |
+|---|---|
+| signal, pointing right | 100 mil stub, label left-justified at its end |
+| signal, pointing left | stub, label **right-justified** at its end, so it runs away from the body |
+| signal, pointing up / down | stub, label turned 90 degrees, reading up from the end / ending at it |
+| power | port the conventional way (supply up, ground down) or the pin's way, at the stub end, 200 or 400 mil further out, the first that touches no body, pin or text; else a label |
+| neighbouring pins of one part on one power net (100 mil apart, one line) | one stub each, one shared wire, a junction at each inner end, one port |
+| a sideways power pin with another pin of its side within 150 mil | a label: no room for a port |
+
+Nothing new may touch a pin end, wire, label or port of another connection: that joins two nets, so such a spot
+is never drawn (a signal tries the longer stubs, then the op is reported). Text extents are estimates (90 mil
+high, 70 mil a character); the result's `connections` carries every box and `overlaps` names what still
+touches, for the caller to check against the saved sheet.
+
 ## DelphiScript hazards that bit repeatedly
 
 - **Shared scratch variables.** The sandbox convention (`I1..I5`, `S1..S5`) is

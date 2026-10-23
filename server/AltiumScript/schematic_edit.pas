@@ -3,8 +3,10 @@
 //
 // The spec is written by server/schematic_edit.py: one pipe-delimited op per line, coordinates in mils,
 // components referenced as "uid:<UNIQUEID>" or "des:<designator>". Every op that cannot be carried out is
-// reported in "errors" and changes nothing; the rest of the spec still runs. A new pin's connection is a
-// 100 mil stub along the pin with a net label, or a power port for a power net.
+// reported in "errors" and changes nothing; the rest of the spec still runs. A pin's new connection (PIN, MAP,
+// ATTACH) is not drawn here: it is reported in "pending", GEOMETRY reports the sheet's parts and connection
+// objects, server/sheet_plan.py plans where each connection goes, and a second spec draws the plan with WIRE,
+// JUNCTION, LABEL and PORT lines.
 
 const
     ED_STUB = 100;          // mils
@@ -17,6 +19,8 @@ var
     EdErrors    : TStringList;
     EdPlaced    : TStringList;
     EdPower     : TStringList;    // "NET=style,orient"
+    EdPending   : TStringList;    // [part key, "pin", "net", x, y, direction]
+    EdGeom      : String;
     EdOps       : Integer;
 
 procedure EdError(Line: String; Why: String);
@@ -248,9 +252,195 @@ begin
         Obj := SchServer.SchObjectFactory(eNetLabel, eCreate_GlobalCopy);
         Obj.Location := Point(MilsToCoord(X), MilsToCoord(Y));
         if (Dir = 1) or (Dir = 3) then Obj.Orientation := 1 else Obj.Orientation := 0;
+        if (Dir = 2) or (Dir = 3) then Obj.Justification := 2;    // bottom right: the text ends at the point
         Obj.Text := Net;
     end;
     EdRegister(Obj);
+end;
+
+// The drawing of a planned connection (server/sheet_plan.py): Just 0 bottom left, 2 bottom right
+procedure EdLabel(X, Y, Orient, Just: Integer; Text: String);
+var
+    Obj : ISch_GraphicalObject;
+begin
+    Obj := SchServer.SchObjectFactory(eNetLabel, eCreate_GlobalCopy);
+    Obj.Location := Point(MilsToCoord(X), MilsToCoord(Y));
+    Obj.Orientation := Orient;
+    Obj.Justification := Just;
+    Obj.Text := Text;
+    EdRegister(Obj);
+end;
+
+procedure EdPort(X, Y, Orient, Style: Integer; Text: String);
+var
+    Obj : ISch_GraphicalObject;
+begin
+    Obj := SchServer.SchObjectFactory(ePowerObject, eCreate_GlobalCopy);
+    Obj.Location := Point(MilsToCoord(X), MilsToCoord(Y));
+    Obj.Style := Style;
+    Obj.Orientation := Orient;
+    Obj.ShowNetName := True;
+    Obj.Text := Text;
+    EdRegister(Obj);
+end;
+
+procedure EdJunction(X, Y: Integer);
+var
+    Obj : ISch_GraphicalObject;
+begin
+    Obj := SchServer.SchObjectFactory(eJunction, eCreate_GlobalCopy);
+    Obj.Location := Point(MilsToCoord(X), MilsToCoord(Y));
+    EdRegister(Obj);
+end;
+
+// A pin's connection, left for the plan: the part by its object address, the pin's electrical end and direction
+procedure EdPend(Comp: ISch_Component; PinDes: String; Net: String; X, Y, D: Integer);
+begin
+    EdPending.Add('[' + IntToStr(Comp.I_ObjectAddress) + ', "' + JSONEscapeString(PinDes) + '", "' +
+                  JSONEscapeString(Net) + '", ' + IntToStr(X) + ', ' + IntToStr(Y) + ', ' + IntToStr(D) + ']');
+end;
+
+// What a visible "=Name" text shows: the text of the part's parameter Name
+function EdParamText(Comp: ISch_Component; Name: String): String;
+var
+    Iter  : ISch_Iterator;
+    Param : ISch_Parameter;
+begin
+    Result := '';
+    Iter := Comp.SchIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(eParameter));
+    Param := Iter.FirstSchObject;
+    while (Param <> nil) do
+    begin
+        if (UpperCase(Param.Name) = UpperCase(Name)) then Result := Param.Text;
+        Param := Iter.NextSchObject;
+    end;
+    Comp.SchIterator_Destroy(Iter);
+end;
+
+// A text as [x, y, orientation, justification, "text"]
+function EdTextJSON(T: ISch_GraphicalObject; Text: String): String;
+begin
+    Result := '[' + IntToStr(CoordToMils(T.Location.X)) + ', ' + IntToStr(CoordToMils(T.Location.Y)) + ', ' +
+              IntToStr(T.Orientation) + ', ' + IntToStr(T.Justification) + ', "' + JSONEscapeString(Text) + '"]';
+end;
+
+// One part for the plan: {key, designator, body [l, b, r, t] of its drawn primitives (pins excluded), pins
+// [[pin, x, y, direction, body-end x, body-end y]], texts (designator and visible parameters)}
+function EdPartGeometry(Comp: ISch_Component): String;
+var
+    Iter          : ISch_Iterator;
+    Prim          : ISch_GraphicalObject;
+    Rect          : IDispatch;
+    L, B, R, T    : Integer;
+    X, Y, D       : Integer;
+    Pins, Texts   : String;
+    Body, S       : String;
+begin
+    L := 999999; B := 999999; R := -999999; T := -999999;
+    Iter := Comp.SchIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(eLine, eRectangle, eArc, ePolyline, eEllipse, ePolygon, eRoundRectangle, eEllipticalArc));
+    Iter.AddFilter_CurrentPartPrimitives;
+    Iter.AddFilter_CurrentDisplayModePrimitives;
+    Prim := Iter.FirstSchObject;
+    while (Prim <> nil) do
+    begin
+        Rect := Prim.BoundingRectangle;
+        if (CoordToMils(Rect.Left) < L) then L := CoordToMils(Rect.Left);
+        if (CoordToMils(Rect.Bottom) < B) then B := CoordToMils(Rect.Bottom);
+        if (CoordToMils(Rect.Right) > R) then R := CoordToMils(Rect.Right);
+        if (CoordToMils(Rect.Top) > T) then T := CoordToMils(Rect.Top);
+        Prim := Iter.NextSchObject;
+    end;
+    Comp.SchIterator_Destroy(Iter);
+    Body := '';
+    if (L <= R) then Body := IntToStr(L) + ', ' + IntToStr(B) + ', ' + IntToStr(R) + ', ' + IntToStr(T);
+
+    Pins := '';
+    Iter := Comp.SchIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(ePin));
+    Iter.AddFilter_CurrentPartPrimitives;
+    Iter.AddFilter_CurrentDisplayModePrimitives;
+    Prim := Iter.FirstSchObject;
+    while (Prim <> nil) do
+    begin
+        EdPinEnd(Prim, X, Y, D);
+        if (Pins <> '') then Pins := Pins + ', ';
+        Pins := Pins + '["' + JSONEscapeString(Prim.Designator) + '", ' + IntToStr(X) + ', ' + IntToStr(Y) + ', ' +
+                IntToStr(D) + ', ' + IntToStr(CoordToMils(Prim.Location.X)) + ', ' +
+                IntToStr(CoordToMils(Prim.Location.Y)) + ']';
+        Prim := Iter.NextSchObject;
+    end;
+    Comp.SchIterator_Destroy(Iter);
+
+    Texts := '';
+    if not Comp.Designator.IsHidden then Texts := EdTextJSON(Comp.Designator, Comp.Designator.Text);
+    Iter := Comp.SchIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(eParameter));
+    Prim := Iter.FirstSchObject;
+    while (Prim <> nil) do
+    begin
+        if not Prim.IsHidden then
+        begin
+            S := Prim.Text;
+            if (Copy(S, 1, 1) = '=') then S := EdParamText(Comp, Copy(S, 2, Length(S)));
+            if (Texts <> '') then Texts := Texts + ', ';
+            Texts := Texts + EdTextJSON(Prim, S);
+        end;
+        Prim := Iter.NextSchObject;
+    end;
+    Comp.SchIterator_Destroy(Iter);
+
+    Result := '{"key": ' + IntToStr(Comp.I_ObjectAddress) + ', "designator": "' + JSONEscapeString(Comp.Designator.Text) +
+              '", "body": [' + Body + '], "pins": [' + Pins + '], "texts": [' + Texts + ']}';
+end;
+
+// The sheet for the plan: every part, net label, power port and wire it owns
+function EdGeometry(Dummy: Integer): String;
+var
+    Iter                       : ISch_Iterator;
+    Obj                        : ISch_GraphicalObject;
+    Parts, Labels, Ports, Wires : TStringList;
+    S                          : String;
+    k                          : Integer;
+begin
+    Parts := TStringList.Create;
+    Labels := TStringList.Create;
+    Ports := TStringList.Create;
+    Wires := TStringList.Create;
+    Iter := EdDoc.SchIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(eSchComponent, eNetLabel, ePowerObject, eWire));
+    Obj := Iter.FirstSchObject;
+    while (Obj <> nil) do
+    begin
+        if EdOwnedBySheet(Obj) then
+        begin
+            if (Obj.ObjectId = eSchComponent) then Parts.Add(EdPartGeometry(Obj))
+            else if (Obj.ObjectId = eNetLabel) then Labels.Add(EdTextJSON(Obj, Obj.Text))
+            else if (Obj.ObjectId = ePowerObject) then
+                Ports.Add('[' + IntToStr(CoordToMils(Obj.Location.X)) + ', ' + IntToStr(CoordToMils(Obj.Location.Y)) +
+                          ', ' + IntToStr(Obj.Orientation) + ', ' + IntToStr(Obj.Style) + ', "' +
+                          JSONEscapeString(Obj.Text) + '"]')
+            else
+            begin
+                S := '';
+                for k := 1 to Obj.VerticesCount do
+                begin
+                    if (S <> '') then S := S + ', ';
+                    S := S + IntToStr(CoordToMils(Obj.Vertex[k].X)) + ', ' + IntToStr(CoordToMils(Obj.Vertex[k].Y));
+                end;
+                Wires.Add('[' + S + ']');
+            end;
+        end;
+        Obj := Iter.NextSchObject;
+    end;
+    EdDoc.SchIterator_Destroy(Iter);
+    Result := '{"parts": [' + EdJoin(Parts) + '], "labels": [' + EdJoin(Labels) + '], "ports": [' + EdJoin(Ports) +
+              '], "wires": [' + EdJoin(Wires) + ']}';
+    Parts.Free;
+    Labels.Free;
+    Ports.Free;
+    Wires.Free;
 end;
 
 procedure EdWire(X1, Y1, X2, Y2: Integer);
@@ -324,6 +514,49 @@ begin
     end;
 end;
 
+// Every model of a part linked to an IntLib or DbLib taken from that library ("Use Component Library"), as a
+// hand-placed part's are. A copy out of a SchLib keeps the symbol's models on "any library", and the ECO then
+// searches every installed library for each one: the raw-head adapter's ECO ran 40 minutes and froze Altium.
+procedure EdBindModels(Comp: ISch_Component);
+var
+    Iter : ISch_Iterator;
+    Impl : ISch_Implementation;
+    Lib  : String;
+begin
+    Lib := UpperCase(Comp.SourceLibraryName);
+    if (Copy(Lib, Length(Lib) - 6, 7) <> '.INTLIB') and (Copy(Lib, Length(Lib) - 5, 6) <> '.DBLIB') then Exit;
+    Iter := Comp.SchIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(eImplementation));
+    Impl := Iter.FirstSchObject;
+    while (Impl <> nil) do
+    begin
+        Impl.UseComponentLibrary := True;
+        Impl := Iter.NextSchObject;
+    end;
+    Comp.SchIterator_Destroy(Iter);
+end;
+
+// The part's models as read back: [{type, name, current, use_component_library}]
+function EdModels(Comp: ISch_Component): String;
+var
+    Iter : ISch_Iterator;
+    Impl : ISch_Implementation;
+begin
+    Result := '';
+    Iter := Comp.SchIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(eImplementation));
+    Impl := Iter.FirstSchObject;
+    while (Impl <> nil) do
+    begin
+        if (Result <> '') then Result := Result + ', ';
+        Result := Result + '{"type": "' + JSONEscapeString(Impl.ModelType) + '", "name": "' +
+                  JSONEscapeString(Impl.ModelName) + '", "current": ' + EdBool(Impl.IsCurrent) +
+                  ', "use_component_library": ' + EdBool(Impl.UseComponentLibrary) + '}';
+        Impl := Iter.NextSchObject;
+    end;
+    Comp.SchIterator_Destroy(Iter);
+end;
+
 // LINK fields: link_library|db_table|design_item|footprint|comment starting at field F
 procedure EdSetLink(Comp: ISch_Component; Rec: String; F: Integer);
 begin
@@ -336,6 +569,7 @@ begin
     if (GetFieldFromPipeString(Rec, F + 2) <> '') then Comp.DesignItemId := GetFieldFromPipeString(Rec, F + 2);
     EdSetModel(Comp, GetFieldFromPipeString(Rec, F + 3));
     if (GetFieldFromPipeString(Rec, F + 4) <> '') then Comp.Comment.Text := GetFieldFromPipeString(Rec, F + 4);
+    EdBindModels(Comp);
 end;
 
 procedure EdSetParam(Comp: ISch_Component; PName: String; PVal: String);
@@ -463,7 +697,9 @@ begin
     Comp.SchIterator_Destroy(Iter);
     EdPlaced.Add('{"designator": "' + JSONEscapeString(Comp.Designator.Text) + '", "uid": "' + Comp.UniqueId +
                  '", "x": ' + IntToStr(CoordToMils(Comp.Location.X)) + ', "y": ' + IntToStr(CoordToMils(Comp.Location.Y)) +
-                 ', "pins": [' + Pins + '], "unassigned_pins": [' + Unassigned + ']}');
+                 ', "pins": [' + Pins + '], "unassigned_pins": [' + Unassigned + '], "library": "' +
+                 JSONEscapeString(Comp.SourceLibraryName) + '", "design_item": "' + JSONEscapeString(Comp.DesignItemId) +
+                 '", "models": [' + EdModels(Comp) + ']}');
 end;
 
 // Finish a PLACE / REPLACE / RELINK block: PARAM, PIN and NOPIN lines up to END
@@ -494,7 +730,7 @@ begin
             else
             begin
                 EdPinEnd(Pin, X, Y, D);
-                EdStub(X, Y, D, GetFieldFromPipeString(Rec, 3));
+                EdPend(Comp, GetFieldFromPipeString(Rec, 2), GetFieldFromPipeString(Rec, 3), X, Y, D);
                 Have := Have + GetFieldFromPipeString(Rec, 2) + '|';
             end;
         end
@@ -509,7 +745,8 @@ begin
             else
             begin
                 EdPinEnd(Pin, X, Y, D);
-                if (Kind = 'PIN') then EdStub(X, Y, D, GetFieldFromPipeString(Rec, 2)) else EdNoErc(X, Y);
+                if (Kind = 'PIN') then EdPend(Comp, GetFieldFromPipeString(Rec, 1), GetFieldFromPipeString(Rec, 2), X, Y, D)
+                else EdNoErc(X, Y);
                 Have := Have + GetFieldFromPipeString(Rec, 1) + '|';
             end;
         end;
@@ -824,6 +1061,8 @@ begin
     EdErrors := TStringList.Create;
     EdPlaced := TStringList.Create;
     EdPower := TStringList.Create;
+    EdPending := TStringList.Create;
+    EdGeom := 'null';
     EdOps := 0;
     Saved := '';
 
@@ -847,7 +1086,7 @@ begin
     begin
         Rec := Spec[i];
         Kind := GetFieldFromPipeString(Rec, 0);
-        if (Kind <> 'POWERNET') and (Kind <> 'SAVE') then EdOps := EdOps + 1;
+        if (Pos('|' + Kind + '|', '|POWERNET|SAVE|GEOMETRY|WIRE|JUNCTION|LABEL|PORT|') = 0) then EdOps := EdOps + 1;
 
         if (Kind = 'POWERNET') then
             EdPower.Add(GetFieldFromPipeString(Rec, 1) + '=' + GetFieldFromPipeString(Rec, 2) + ',' + GetFieldFromPipeString(Rec, 3))
@@ -908,7 +1147,8 @@ begin
             else
             begin
                 EdPinEnd(Obj, X, Y, D);
-                if (Kind = 'ATTACH') then EdStub(X, Y, D, GetFieldFromPipeString(Rec, 3)) else EdNoErc(X, Y);
+                if (Kind = 'ATTACH') then EdPend(Comp, GetFieldFromPipeString(Rec, 2), GetFieldFromPipeString(Rec, 3), X, Y, D)
+                else EdNoErc(X, Y);
             end;
         end
         else if (Kind = 'DETACH') then
@@ -988,6 +1228,21 @@ begin
                 EdFinishPart(Comp, Spec, i, Rec);
             end;
         end
+        else if (Kind = 'WIRE') then
+            EdWire(StrToInt(GetFieldFromPipeString(Rec, 1)), StrToInt(GetFieldFromPipeString(Rec, 2)),
+                   StrToInt(GetFieldFromPipeString(Rec, 3)), StrToInt(GetFieldFromPipeString(Rec, 4)))
+        else if (Kind = 'JUNCTION') then
+            EdJunction(StrToInt(GetFieldFromPipeString(Rec, 1)), StrToInt(GetFieldFromPipeString(Rec, 2)))
+        else if (Kind = 'LABEL') then
+            EdLabel(StrToInt(GetFieldFromPipeString(Rec, 1)), StrToInt(GetFieldFromPipeString(Rec, 2)),
+                    StrToInt(GetFieldFromPipeString(Rec, 3)), StrToInt(GetFieldFromPipeString(Rec, 4)),
+                    GetFieldFromPipeString(Rec, 5))
+        else if (Kind = 'PORT') then
+            EdPort(StrToInt(GetFieldFromPipeString(Rec, 1)), StrToInt(GetFieldFromPipeString(Rec, 2)),
+                   StrToInt(GetFieldFromPipeString(Rec, 3)), StrToInt(GetFieldFromPipeString(Rec, 4)),
+                   GetFieldFromPipeString(Rec, 5))
+        else if (Kind = 'GEOMETRY') then
+            EdGeom := EdGeometry(0)
         else if (Kind = 'SAVE') then
         begin
             SchServer.ProcessControl.PostProcess(EdDoc, '');
@@ -1006,11 +1261,13 @@ begin
 
     Result := '{"success": ' + EdBool(EdErrors.Count = 0) + ', "sheet": "' + JSONEscapeString(EdSheetPath) +
               '", "saved": "' + JSONEscapeString(Saved) + '", "ops": ' + IntToStr(EdOps) +
-              ', "errors": [' + EdJoin(EdErrors) + '], "placed": [' + EdJoin(EdPlaced) + ']}';
+              ', "errors": [' + EdJoin(EdErrors) + '], "placed": [' + EdJoin(EdPlaced) + '], "pending": [' +
+              EdJoin(EdPending) + '], "geometry": ' + EdGeom + '}';
     Spec.Free;
     EdErrors.Free;
     EdPlaced.Free;
     EdPower.Free;
+    EdPending.Free;
 end;
 
 // annotate_schematic: SHEET lines, ASSIGN|uid|designator lines resolved over all those sheets, SAVE

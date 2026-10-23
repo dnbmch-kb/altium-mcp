@@ -199,5 +199,75 @@ class ToolValidationTest(unittest.TestCase):
         self.assertEqual(self.calls, [])
 
 
+class TwoPassTest(unittest.TestCase):
+    """edit_schematic connects pins in two bridge calls: the ops and the sheet's geometry, then the planned drawing."""
+
+    def setUp(self):
+        import main
+        self.main = main
+        self.tmp = tempfile.TemporaryDirectory()
+        base = Path(self.tmp.name)
+        self.sheet = base / "Board.SchDoc"
+        self.sheet.write_bytes(b"x")
+        self.lib = base / "parts.SchLib"
+        self.lib.write_bytes(b"x")
+        self.saved = (main.altium_bridge.execute_command, main.EDIT_SPEC_FILE)
+        main.EDIT_SPEC_FILE = base / "edit_spec.txt"
+        self.specs, self.answers = [], []
+
+        async def bridge(command, params):
+            self.specs.append(main.EDIT_SPEC_FILE.read_text(encoding="utf-8-sig").splitlines())
+            return {"success": True, "result": self.answers.pop(0)}
+        main.altium_bridge.execute_command = bridge
+
+    def tearDown(self):
+        self.main.altium_bridge.execute_command, self.main.EDIT_SPEC_FILE = self.saved
+        self.tmp.cleanup()
+
+    def run_tool(self, ops):
+        import asyncio
+        import json
+        return json.loads(asyncio.run(self.main.edit_schematic(None, str(self.sheet), ops)))
+
+    def placed(self, bound=True):
+        return {"designator": "JP1", "uid": "AAAA", "x": 1200, "y": 1100, "pins": [], "unassigned_pins": [],
+                "library": "dnbm.IntLib", "design_item": "HDR3",
+                "models": [{"type": "PCBLIB", "name": "HDR_1X03", "current": True, "use_component_library": bound}]}
+
+    def test_a_left_pin_is_labelled_on_its_side_and_the_sheet_saved_in_the_second_pass(self):
+        geometry = {"parts": [{"key": 77, "designator": "JP1", "body": [1100, 950, 1300, 1250],
+                               "pins": [["1", 1000, 1100, 2, 1100, 1100]], "texts": []}],
+                    "labels": [], "ports": [], "wires": []}
+        self.answers = [{"success": True, "sheet": str(self.sheet), "saved": "", "ops": 1, "errors": [],
+                         "placed": [self.placed()], "pending": [[77, "1", "SDA", 1000, 1100, 2]],
+                         "geometry": geometry},
+                        {"success": True, "sheet": str(self.sheet), "saved": str(self.sheet), "ops": 0,
+                         "errors": [], "placed": [], "pending": [], "geometry": None}]
+        r = self.run_tool([{"op": "place", "designator": "JP1", "symbol_library": str(self.lib), "lib_ref": "HDR3",
+                            "x": 1200, "y": 1100, "link_library": "dnbm.IntLib", "pins": {"1": "SDA"}}])
+        first, second = self.specs
+        self.assertEqual(first[-1], "GEOMETRY")
+        self.assertNotIn("SAVE", first)
+        self.assertEqual(second, [f"SHEET|{self.sheet}", "WIRE|1000|1100|900|1100", "LABEL|900|1100|0|2|SDA", "SAVE"])
+        self.assertTrue(r["success"], r)
+        self.assertEqual(r["saved"], str(self.sheet))
+        self.assertEqual(r["connections"][0]["kind"], "label")
+        self.assertNotIn("geometry", r)
+
+    def test_a_model_left_on_any_library_is_an_error(self):
+        self.answers = [{"success": True, "sheet": str(self.sheet), "saved": str(self.sheet), "ops": 1, "errors": [],
+                         "placed": [self.placed(bound=False)], "pending": [], "geometry": None}]
+        r = self.run_tool([{"op": "place", "designator": "JP1", "symbol_library": str(self.lib), "lib_ref": "HDR3",
+                            "x": 1200, "y": 1100, "link_library": "dnbm.IntLib"}])
+        self.assertFalse(r["success"])
+        self.assertIn("JP1 PCBLIB HDR_1X03", r["errors"][0])
+        self.assertEqual(self.specs[0][-1], "SAVE")          # nothing to connect: one pass, saved
+
+    def test_unbound_models_ignore_unlinked_parts(self):
+        part = dict(self.placed(bound=False), library="parts.SchLib")
+        self.assertEqual(se.unbound_models([part]), [])
+        self.assertEqual(se.unbound_models([self.placed(bound=False)]), ["JP1 PCBLIB HDR_1X03"])
+
+
 if __name__ == "__main__":
     unittest.main()

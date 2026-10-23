@@ -31,6 +31,7 @@ from altium_files import ansi_script, read_altium_text, write_altium_text
 from outjob_parser import parse_outjob
 import schematic_edit
 import script_lock
+import sheet_plan
 
 # Configure logging
 logging.basicConfig(
@@ -2837,14 +2838,55 @@ EDIT_SPEC_FILE = EXCHANGE_DIR / "edit_spec.txt"
 ANNOTATE_SPEC_FILE = EXCHANGE_DIR / "annotate_spec.txt"
 
 
-async def _spec_command(command: str, spec_file: Path, lines: list) -> str:
-    """Write a spec for the bridge and run the command that reads it; the bridge's JSON comes back as is."""
+async def _bridge_spec(command: str, spec_file: Path, lines: list) -> dict:
+    """Write a spec for the bridge and run the command that reads it; the bridge's JSON as a dict."""
     write_altium_text(spec_file, "\n".join(lines) + "\n")
     response = await altium_bridge.execute_command(command, {})
     if not response.get("success", False):
-        return json.dumps({"success": False, "error": response.get("error", "unknown error")})
+        return {"success": False, "error": response.get("error", "unknown error")}
     result = response.get("result", {})
-    return result if isinstance(result, str) else json.dumps(result, indent=2, ensure_ascii=False)
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except ValueError:
+            return {"success": False, "error": "the bridge's answer is not JSON", "raw_response": result[:500]}
+    return result
+
+
+async def _spec_command(command: str, spec_file: Path, lines: list) -> str:
+    return json.dumps(await _bridge_spec(command, spec_file, lines), indent=2, ensure_ascii=False)
+
+
+async def _edit_command(sheet: str, ops: list, power_nets: list, save: bool) -> str:
+    """edit_schematic in two passes when it connects pins: the ops run and Altium reports the pins to connect and
+    the sheet (pass 1, nothing saved), sheet_plan places each connection where it touches nothing, pass 2 draws
+    the plan and saves."""
+    try:
+        lines = schematic_edit.edit_spec(sheet, ops, power_nets, save=False)
+    except ValueError as e:
+        return json.dumps({"success": False, "error": str(e)})
+    path = lines[0].split("|", 1)[1]
+    connects = any(line.split("|", 1)[0] in schematic_edit.CONNECTIONS for line in lines)
+    first = await _bridge_spec("edit_schematic", EDIT_SPEC_FILE,
+                               lines + (["GEOMETRY"] if connects else ["SAVE"] if save else []))
+    geometry, pending = first.pop("geometry", None), first.pop("pending", [])
+    errors = first.setdefault("errors", [])
+    if connects and geometry is not None:
+        objects = sheet_plan.plan(geometry, pending, schematic_edit.power_table(power_nets))
+        second = await _bridge_spec("edit_schematic", EDIT_SPEC_FILE, sheet_plan.draw_spec(path, objects, save))
+        first["saved"] = second.get("saved", "")
+        errors += objects["errors"] + second.get("errors", [])
+        if "error" in second:
+            errors.append(f"drawing the connections: {second['error']}")
+        first["connections"] = objects["connections"]
+        first["overlaps"] = objects["overlaps"]
+    unbound = schematic_edit.unbound_models(first.get("placed", []))
+    if unbound:
+        errors.append("models not taken from their component library (the ECO would search every installed "
+                      "library for them): " + ", ".join(unbound))
+    if "error" not in first:
+        first["success"] = not errors
+    return json.dumps(first, indent=2, ensure_ascii=False)
 
 
 @mcp.tool()
@@ -2873,10 +2915,14 @@ async def edit_schematic(ctx: Context, sheet: str, ops: list, power_nets: list =
     """
     Edit an EXISTING schematic sheet: delete, rename, connect, place and replace parts.
 
-    Every connection the tool makes is a 100 mil stub out of the pin with a net label, or a power port for a
-    power net, so it never routes a wire across the sheet. Read the result's "errors": an op that cannot be
-    carried out changes nothing and is listed there; the rest still runs. Verify with a connectivity readback
-    of the saved sheet (c:/Projects/tools/altium/sch_nets.py), not with the result alone.
+    Every connection the tool makes is a short stub out of the pin with a net label or a power port, so it never
+    routes a wire across the sheet. Where it goes is planned from the placed symbols (server/sheet_plan.py): a
+    label on the pin's own side, justified so it runs away from the body; a power port turned and moved out
+    until it touches no body, pin or text, shared by neighbouring pins of one part on one power net, else a label;
+    never a spot that touches another net's pin, wire, label or port. "connections" returns each one's boxes and
+    "overlaps" what still touches. Read the result's "errors": an op that cannot be carried out changes nothing
+    and is listed there; the rest still runs. Verify with a connectivity readback of the saved sheet
+    (c:/Projects/tools/altium/sch_nets.py), not with the result alone.
 
     Components are referenced as "uid:<UNIQUEID>" (read from the file) or "des:<designator>".
 
@@ -2910,13 +2956,12 @@ async def edit_schematic(ctx: Context, sheet: str, ops: list, power_nets: list =
 
     Returns:
         str: JSON with success, sheet, saved, ops, errors [..], placed [{designator, uid, x, y,
-             pins [[pin, x, y]], unassigned_pins}]
+             pins [[pin, x, y]], unassigned_pins, library, design_item, models [{type, name, current,
+             use_component_library}]}], connections [{designator, pins, net, kind, boxes [[l, b, r, t]]}],
+             overlaps [..]. A part linked to an IntLib or DbLib takes every model from that library ("Use Component
+             Library", as a hand-placed part does); one that does not is an error.
     """
-    try:
-        lines = schematic_edit.edit_spec(sheet, ops, power_nets, save)
-    except ValueError as e:
-        return json.dumps({"success": False, "error": str(e)})
-    return await _spec_command("edit_schematic", EDIT_SPEC_FILE, lines)
+    return await _edit_command(sheet, ops, power_nets, save)
 
 
 @mcp.tool()
@@ -2953,11 +2998,7 @@ async def replace_component(ctx: Context, sheet: str, comp: str, symbol_library:
               mirror=mirror)
     if orient is not None:
         op["orient"] = orient
-    try:
-        lines = schematic_edit.edit_spec(sheet, [op], power_nets, save)
-    except ValueError as e:
-        return json.dumps({"success": False, "error": str(e)})
-    return await _spec_command("edit_schematic", EDIT_SPEC_FILE, lines)
+    return await _edit_command(sheet, [op], power_nets, save)
 
 
 @mcp.tool()
