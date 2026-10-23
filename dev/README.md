@@ -169,6 +169,24 @@ Put risky reads (enum properties, anything that might not exist on this
 install) at the **end** of an experiment. `SandboxLog` flushes on every call,
 so a wedge there still leaves everything useful already on disk.
 
+## AD25 facts
+
+Each found on a board and checked by a readback; the date and the board say where.
+
+- **A component kind lives on the symbol.** A SchLib symbol takes one (`COMPONENTKIND` 1 Mechanical, 4 Net Tie
+  without BOM) and the ECO carries it to the board part; setting `ComponentKind` on a PcbLib footprint raises a
+  runtime error (altium-lib-factory `e9e7f6b`, 2026-10-23, for dss-r0-aiv's net tie and LED240P's standoff).
+- **Update PCB does not add a part that is Mechanical on the sheet only**, and offers a Standard board part whose
+  sheet part is Mechanical for removal: send it over Standard, then set Mechanical on both (dss-r0-aiv LED240P,
+  2026-10-23).
+- **A `Repeat()` sheet entry drawn by script binds nothing**: it compiles as a wire sheet entry on a bus and stays
+  unconnected in every channel. Plain entries bind, so a script-built top sheet takes one sheet symbol per
+  channel, which gives the same rooms and channel designators (dss-r0-aiv CTRL, 2026-10-23).
+- **A via's tenting holds only in manual mask mode**: `SolderMaskExpansionMode := eMaskExpansionMode_Manual`
+  before `IsTenting_Top` / `IsTenting_Bottom` (laser-calib raw-head adapter, 2026-10-23).
+- **A design rule's enable flag is `DRCEnabled`**; the saved `ENABLED` field follows it, `Enabled` is not stored
+  (raw-head adapter, 2026-10-23).
+
 ## Findings
 
 - [`SCHEMATIC_CONVENTIONS.md`](SCHEMATIC_CONVENTIONS.md) - **read before

@@ -200,6 +200,22 @@ The server communicates with Altium Designer using a scripting bridge:
 
 Files exchanged with the scripts are read and written the way Altium does: in the Windows ANSI code page, or as UTF-8 when the file starts with a byte-order mark.
 
+### What the bridge carries
+
+- **To Altium, every character.** `request.json` and the spec files (`edit_spec.txt`, `annotate_spec.txt`, `circuit_spec.txt`) are UTF-8 with a byte-order mark and their text unescaped, so `TStringList.LoadFromFile` decodes them and every value reaches the script as typed, including the array items and values the line parsers take apart. Checked at file level with "Fühler 25 °C ß" (`server/tests/test_bridge_text.py`).
+- **A script, the ANSI code page.** `run_altium_script` writes the sandbox unit in the ANSI code page (cp1252 here), the way Altium's editor saves a script; a character that code page lacks is refused before Altium runs, by line, column and code point: write it as `Chr(<code>)`.
+- **From Altium, the ANSI code page.** The scripts' `SaveToFile` writes the response in the ANSI code page, so a character outside it comes back as `?`.
+- **The file holding a character is not the board drawing it.** Altium's stroke fonts carry IBM code page 437 while Altium hands them the ANSI code, so a silk `ä` plots as `Σ` and `·` as `╖` on the Gerbers although the PcbDoc holds the right character; any text with a character beyond ASCII takes a TrueType font (Elch TEMPMODUL, 2026-10-23).
+
+## Facts the boards found
+
+Each one cost a session; the date and the board say where.
+
+- **The bridge waits 120 s per call** (`server/main.py`); a longer batch reports a timeout while Altium finishes and saves it, and the script lock is already released. About 15 parts per `edit_schematic` call (25 s on S31DEV, 2026-10-22). A call that connects pins makes two bridge calls, each with its own wait.
+- **Altium may open a Sign In window when it starts** (a WPF window titled "Sign In", class `HwndWrapper[X2.EXE;...]`); a script run waits behind it until it is closed by its Cancel button. `c:/Projects/tools/altium/altium_run.py` cancels it (tools 18c4fdb, from the night of 2026-10-22).
+- **A document opened by a relative path appears twice**: Altium names a document by the path it was opened with, so the same file under a second spelling opens a second copy and asks to reload. Pass absolute paths (raw-head adapter, 2026-10-23).
+- AD25 API and ECO facts (component kinds, Mechanical parts in Update PCB, `Repeat()` entries, via tenting, a rule's enable flag): [`dev/README.md`](dev/README.md) § AD25 facts.
+
 ## References
 - Get scripts' project path from Jeff Collins and William Kitchen's stripped down version
 - BlenderMCP: I got inspired by hearing about MCP being used in Blender and used it as a reference. https://github.com/ahujasid/blender-mcp
@@ -220,7 +236,6 @@ This is a third-party integration and not made by Altium. Made by [coffeenmusic]
 
 # TODO:
 - `edit_schematic` place: a part copied out of a .SchLib keeps the library symbol's UniqueId, so every copy of one symbol shares it until Altium reassigns them on the next load (27 of S31DEV's 41 parts, 2026-10-22). Give each placed part a fresh id after `EdReplicate`; until then open and save the sheet once before an ECO.
-- The bridge waits 120 s for a response (`server/main.py`); a longer `edit_schematic` batch reports a timeout while Altium finishes and saves it, and the script lock is already released. Split batches (about 15 parts run in 25 s).
 - Change selection filter:
   - `scripts-libraries\Scripts - PCB\FilterObjects\`
   - `scripts-libraries\Scripts - SCH\SelectionFilter\`
