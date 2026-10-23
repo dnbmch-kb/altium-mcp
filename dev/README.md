@@ -21,6 +21,50 @@ library batch, laser-calib's footprint library). Each holds the lock in [`../ser
 arrives; a busy Altium is reported with the holder's name, pid and start. The dialog closers here touch only
 windows owned by `X2.EXE` (`capture_window.owner_exe`), never another application's.
 
+## The mailbox
+
+Every altium-mcp server on the machine shares one Altium and one folder, `C:\Users\Public\altium_mcp\`
+(about 20 server processes from registered sessions on 2026-10-23); the layout is in the README § How It Works
+and in [`../server/mailbox.py`](../server/mailbox.py). What keeps it unambiguous:
+
+- **One folder per request.** `mail\<id>\` holds the request, the spec files its command reads (`edit_spec.txt`,
+  `annotate_spec.txt`, `circuit_spec.txt`) and everything the script writes for it (its `temp_*.json`, a build's
+  `pin_map.txt`, a print's `shot.OutJob` and `shot.pdf`): the script's `ROOT_DIR` is that folder while it serves
+  the request. Two servers never write the same file, and a spec is written with its request, under the lock.
+- **The sender in the id, the id in the answer.** `<pid>-<ms>-<seq>`; `response.json` echoes `request_id`, and the
+  server compares it.
+- **Only the lock holder's requests run.** `Altium_API.pas` `Run` reads the lock's pid and takes from `queue\` only
+  requests whose id starts with it, by renaming the entry to `mail\<id>\taken` (`ServeQueue`, up to 20 in one
+  run, oldest first, so a RunScript that Altium dropped is covered by the next run). A request left in the queue by
+  a server that gave up or died is never run later: the next server under the lock moves it to its folder as
+  `expired` (`mailbox.expire_others`), and a server that gives up withdraws its own entry when the bridge has not
+  taken it yet (`withdrawn`).
+- **The answer appears whole**: `response.tmp`, renamed to `response.json`.
+- **Progress, not a clock.** The script appends `seq|elapsed ms|step|count|total` to `progress.log` (`BridgeProgress`
+  in `other_utils.pas`, the file rewritten whole and capped at 400 records; a write that meets the server reading
+  is skipped). The server reads the file only when its size or time changed, gives up after `STALL_SECONDS` (120)
+  without a record (`STALL_BY_COMMAND`: 900 for `run_output_jobs`, 300 for a print), and says what it saw: not
+  taken (withdrawn, nothing ran) or the last record, Altium hung, a box. `status.json` carries the call in flight
+  (state queued / running / answered / stalled, the last record) for a watchdog; MCP progress notifications go to
+  a client that sent a progress token.
+- **Altium's boxes.** Every second the server looks for a box of `X2.EXE` (`#32770`, `TMessageForm`) that was not
+  there when the call began. Before the take it is Altium refusing the RunScript ("Another script executing now"):
+  pictured as `refused_N.png`, closed, the RunScript sent again (up to 5 times). After the take it holds our
+  script: seen twice, pictured as `dialog_N.png` and closed, and the script gets 10 s more to report before the
+  call gives up.
+- **The single-file protocol until every server restarts.** A server started before the mailbox writes
+  `request.json` at the root (after deleting `response.json`) and holds the lock as `altium-mcp <command>`; a
+  mailbox server holds it as `altium-mcp <command> (mailbox)`. `Run` answers the root request only when nobody's
+  queued request was served, the lock's owner names no mailbox, `response.json` is absent and `request.json` is
+  younger than 130 s (`ServeLegacy`), so an abandoned root request never runs again. A print request without its
+  OutJob template gets the old focus-and-zoom answer (`TakeViewFocus`), which such a server grabs a window after.
+  Drop both once no server older than the mailbox runs.
+
+Deploying a bridge change goes live for every server at its next call: they all run
+`C:\Projects\altium-mcp\server\main.py` and stage the bridge from this checkout's files by their hash. So the
+script is developed in a worktree (its `dev/call_tool.py` stages its own copy) and reaches the main checkout only
+after it compiled and served both protocols live.
+
 ## Calling a tool from a shell
 
 `dev/call_tool.py` calls any server tool without an MCP client, through FastMCP's own `call_tool`: the same
@@ -61,7 +105,13 @@ hostile to automation:
 
 ## Screenshots are a standing TOP priority
 
-**SOLVED - use dev/render_sheet.py.** Headless render via Select All +
+**SOLVED - `get_screenshot` prints.** A board or sheet is printed by Altium (PCB Print or Schematic Print in an
+OutJob that joins the document's project for the print, published to PDF, rasterised with `pypdfium2`), so the
+picture is the document in memory, never a window (README § Both). The server's venv needs `pypdfium2`
+(`uv pip install --python %USERPROFILE%\.altium-mcp\venv\Scripts\python.exe pypdfium2==5.14.0`; the launcher's
+list and `requirements.txt` carry it). The window grab is kept for Altium's dialogs (`view_type: "dialog"`).
+
+**Also: dev/render_sheet.py.** Headless render via Select All +
 Sch:Copy: Altium puts a properly framed metafile on the clipboard (the same
 mechanism that pastes schematics into Word); the script extracts and
 rasterizes it to PNG. No window, no foreground, no paint state - always
@@ -191,6 +241,28 @@ Each found on a board and checked by a readback; the date and the board say wher
   `<>`, but does not convert to text (edit_schematic's first live two-pass run, 2026-10-23).
 - **A design rule's enable flag is `DRCEnabled`**; the saved `ENABLED` field follows it, `Enabled` is not stored
   (raw-head adapter, 2026-10-23).
+- **A routine is known only below its declaration in its own unit.** `TakeViewScreenshot` calling `PrintView`
+  further down `other_utils.pas` raised "Undeclared identifier: PrintView" when the call ran (a box, the script
+  ended); a routine of another unit of the project resolves wherever it is (the bridge's first print, 2026-10-23).
+- **Altium refuses a RunScript while a script runs**, with the box "Another script executing now. Scripting system
+  is not able to execute more than one script simultaneously."; the run is not queued, and the box holds Altium
+  until it closes (a bridge call that took the lock as the previous script was returning, 2026-10-23).
+- **An OutJob resolves its documents only inside its project.** A free OutJob naming a board by full path or by
+  name answered "Missing file: ..." (a box) and published nothing; added to the board's project
+  (`Prj.DM_AddSourceDocument`) it published the PDF in about 1 s, and `DM_RemoveSourceDocument` plus the project's
+  `IServerDocument.Modified` put back left the project as it was, its file untouched. A free document (in the Free
+  Documents project) prints nothing, the OutJob joined or not, and no box. `WorkspaceManager:Print` with
+  `Action=PublishToPDF|ObjectKind=OutputBatch|OutputMedium=<container>|DisableDialog=True`, the OutJob focused;
+  `OpenOutput=0` keeps the PDF closed (scratch copy of Elch TEMPMODUL, 2026-10-23).
+- **A PCB Print draws its first layer record on top**: `TopOverlay, TopLayer, BottomLayer, ...` shows the top pour
+  over the bottom, the reverse order the bottom over the top. Its `PrintArea=SpecificArea` corners are absolute
+  internal units (`Rect.Left` of a component as it is); the same numbers in mils printed an empty page. The record
+  names a layer without spaces: `TopLayer`, `MidLayer1`, `BottomLayer`, `InternalPlane1`, `MultiLayer`,
+  `TopOverlay`, `KeepOutLayer`, `Mechanical<n>`; `Layer2String` gives `Top Layer` and `Mechanical Layer 1`, and the
+  V6 id of every mechanical layer above 16 is 72, so mechanical layers are named by their index (same board).
+- **`FindFiles(folder, mask, faAnyFile, False, list)`** lists a folder's files with their paths in upper case;
+  `RenameFile` moves a file into another folder and answers False when the source is gone, which is the bridge's
+  take (2026-10-23).
 
 ## Findings
 
