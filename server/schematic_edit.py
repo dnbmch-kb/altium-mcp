@@ -127,10 +127,26 @@ def _link_fields(op, what):
                     for k in ("link_library", "db_table", "design_item", "footprint", "comment"))
 
 
-def _part_block(op, what, power):
-    lines = []
+def _description(op, what):
+    """The part's own Description: the op's description, or a parameter named Description (any case). Altium keeps
+    no parameter of that name - a DbLib column mapped to Description lands in the component description - so one
+    written as a parameter never reached the saved sheet."""
+    desc = None if op.get("description") in (None, "") else _text(op["description"], what + " description")
     for name, value in (op.get("parameters") or {}).items():
-        lines.append(f"PARAM|{_text(name, what + ' parameter name')}|{_text(value, what + ' parameter ' + name)}")
+        if str(name).lower() == "description":
+            value = _text(value, f"{what} parameter {name}")
+            if desc is not None and desc != value:
+                raise ValueError(f"{what}: description {desc!r} and parameter {name} {value!r} differ")
+            desc = value
+    return desc
+
+
+def _part_block(op, what, power):
+    desc = _description(op, what)
+    lines = [] if desc is None else [f"DESCRIPTION|{desc}"]
+    for name, value in (op.get("parameters") or {}).items():
+        if str(name).lower() != "description":
+            lines.append(f"PARAM|{_text(name, what + ' parameter name')}|{_text(value, what + ' parameter ' + name)}")
     pins = op.get("pins") or {}
     for pin, net in pins.items():
         lines.append(_net_line("PIN", pin, net, power))

@@ -2946,16 +2946,23 @@ async def edit_schematic(ctx: Context, sheet: str, ops: list, power_nets: list =
             {"op": "no_erc_pins", "comp", "pins": [..]}
             {"op": "attach_entry", "symbol", "entry", "net"}   a sheet symbol's entry
             {"op": "place", "designator", "symbol_library", "lib_ref", "x", "y", "orient", "mirror",
-             "link_library", "db_table", "design_item", "footprint", "comment", "parameters": {},
+             "link_library", "db_table", "design_item", "footprint", "comment", "description", "parameters": {},
              "pins": {pin: net}, "no_erc": [pin], "part"} symbol copied from a .SchLib; link_library (e.g.
                                                          "dnbm.IntLib" or "Res-Gen.DbLib") is what it links to;
                                                          part (1 = A, 2 = B, ...) places one part of a multi-part
-                                                         symbol, one place op per part under one designator
+                                                         symbol, one place op per part under one designator;
+                                                         description sets the part's own Description (the
+                                                         component description, as build_schematic's does).
+                                                         Altium keeps no parameter named Description, so a
+                                                         "Description" key in parameters (any case) sets the
+                                                         component description too; given both, they must match
             {"op": "replace", "comp", "symbol_library", "lib_ref", "pin_map": {old: new},
-             "nets": {new_pin: net}, place's link fields} every mapped new pin needs its net: the old pin's end
+             "nets": {new_pin: net}, place's link fields, "description", "parameters": {}}
+                                                         every mapped new pin needs its net: the old pin's end
                                                          gets the same net, so the old wiring keeps it
             {"op": "relink", "comp", "link_library", "db_table", "design_item", "footprint", "comment",
-             "parameters": {}}                           changes a part's library link and keeps its symbol
+             "description", "parameters": {}}            changes a part's library link and keeps its symbol;
+                                                         description and parameters as in place
             {"op": "wire", "points": [P, P, ...], "junctions": [P]}   orthogonal segments through the points; a
                                                          point P is [x, y] or {"comp": "des:R1", "pin": "2"} (that
                                                          pin's end); junctions only at tees
@@ -2997,7 +3004,8 @@ async def replace_component(ctx: Context, sheet: str, comp: str, symbol_library:
         pin_map: {old_pin: new_pin}.
         nets: {new_pin: net}, required for every mapped pin; extra entries connect unmapped new pins.
         no_erc: new pins to mark No-ERC.
-        link_library, db_table, design_item, footprint, comment, parameters: the new part's library link.
+        link_library, db_table, design_item, footprint, comment, parameters: the new part's library link; a
+            "Description" parameter sets the part's own Description (Altium keeps no parameter of that name).
         orient: 0-3, default the old part's. mirror: mirror the new part.
         power_nets: nets drawn as power ports (GND, 3V3, 5V always). save: save afterwards.
 

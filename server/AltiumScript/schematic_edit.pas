@@ -716,7 +716,8 @@ begin
                  '", "models": [' + EdModels(Comp) + ']}');
 end;
 
-// Finish a PLACE / REPLACE / RELINK block: PARAM, PIN and NOPIN lines up to END
+// Finish a PLACE / REPLACE / RELINK block: DESCRIPTION, PARAM, PIN and NOPIN lines up to END. DESCRIPTION is the
+// part's own Description, as build_schematic sets it: Altium keeps no parameter of that name.
 function EdFinishPart(Comp: ISch_Component; Spec: TStringList; var i: Integer; Line: String): Boolean;
 var
     Rec, Kind, Unassigned, Have : String;
@@ -732,6 +733,7 @@ begin
         Rec := Spec[i];
         Kind := GetFieldFromPipeString(Rec, 0);
         if (Kind = 'PARAM') then EdSetParam(Comp, GetFieldFromPipeString(Rec, 1), GetFieldFromPipeString(Rec, 2))
+        else if (Kind = 'DESCRIPTION') then Comp.ComponentDescription := GetFieldFromPipeString(Rec, 1)
         else if (Kind = 'MAP') then
         begin
             // MAP|old|new|net: the old end was labelled before the swap; stub the new pin with the same net

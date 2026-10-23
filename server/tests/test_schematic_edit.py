@@ -61,6 +61,28 @@ class EditSpecTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "part must be a whole number"):
             self.spec([dict(op, part=0)])
 
+    def test_description_and_a_description_parameter_set_the_component_description(self):
+        op = {"op": "place", "designator": "C1", "symbol_library": str(self.lib), "lib_ref": "CAP",
+              "x": 0, "y": 0, "link_library": "Cap-Gen.DbLib", "description": "CAP CER 0.1UF 50V X7R 0402",
+              "parameters": {"Value": "0.1uF"}}
+        lines = self.spec([op])
+        i = next(k for k, l in enumerate(lines) if l.startswith("PLACE|"))
+        self.assertEqual(lines[i + 1:i + 4], ["DESCRIPTION|CAP CER 0.1UF 50V X7R 0402", "PARAM|Value|0.1uF", "END"])
+        # an older caller's Description parameter: the component description, never a PARAM line
+        old = dict(op, description=None, parameters={"description": "CAP CER 1UF", "Value": "1uF"})
+        lines = self.spec([old])
+        self.assertIn("DESCRIPTION|CAP CER 1UF", lines)
+        self.assertFalse([l for l in lines if l.upper().startswith("PARAM|DESCRIPTION")])
+        self.assertIn("DESCRIPTION|CAP CER 1UF", self.spec([dict(old, description="CAP CER 1UF")]))
+        relink = self.spec([{"op": "relink", "comp": "des:C1", "description": "CAP CER 10UF"}])
+        self.assertEqual(relink[relink.index("RELINK|des:C1|||||") + 1:][:2], ["DESCRIPTION|CAP CER 10UF", "END"])
+        self.assertNotIn("DESCRIPTION|", "\n".join(self.spec([dict(op, description="")])))
+        for bad, msg in ((dict(old, description="CAP CER 2UF"), "differ"),
+                         (dict(op, description="A|B"), "may not contain"),
+                         (dict(op, description=None, parameters={"Description": ""}), "parameter Description is empty")):
+            with self.subTest(msg=msg), self.assertRaisesRegex(ValueError, msg):
+                self.spec([bad])
+
     def test_replace_needs_a_net_for_every_mapped_pin_and_maps_by_function(self):
         op = {"op": "replace", "comp": "uid:XHHAWBYW", "symbol_library": str(self.lib), "lib_ref": "BZT52H-B5V6-QX",
               "pin_map": {"2": "1", "1": "2"}, "nets": {"1": "5V"}}
@@ -261,6 +283,20 @@ class TwoPassTest(unittest.TestCase):
         self.assertFalse(r["success"])
         self.assertIn("JP1 PCBLIB HDR_1X03", r["errors"][0])
         self.assertEqual(self.specs[0][-1], "SAVE")          # nothing to connect: one pass, saved
+
+    def test_the_request_carries_the_description_inside_the_place_block(self):
+        self.answers = [{"success": True, "sheet": str(self.sheet), "saved": str(self.sheet), "ops": 1, "errors": [],
+                         "placed": [self.placed()], "pending": [], "geometry": None}]
+        r = self.run_tool([{"op": "place", "designator": "C1", "symbol_library": str(self.lib), "lib_ref": "CAP",
+                            "x": 1000, "y": 1000, "link_library": "Cap-Gen.DbLib", "db_table": "Murata_GRM_0402",
+                            "design_item": "GRM155R71H104KE14D", "description": "PROOF DESC 0.1UF",
+                            "parameters": {"Proof": "1"}}])
+        self.assertTrue(r["success"], r)
+        spec = self.specs[0]
+        i = next(k for k, l in enumerate(spec) if l.startswith("PLACE|"))
+        self.assertEqual(spec[i], f"PLACE|C1|{self.lib}|CAP|1000|1000|0|0|Cap-Gen.DbLib|Murata_GRM_0402|"
+                                  "GRM155R71H104KE14D||")
+        self.assertEqual(spec[i + 1:], ["DESCRIPTION|PROOF DESC 0.1UF", "PARAM|Proof|1", "END", "SAVE"])
 
     def test_unbound_models_ignore_unlinked_parts(self):
         part = dict(self.placed(bound=False), library="parts.SchLib")
