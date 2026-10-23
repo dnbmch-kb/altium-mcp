@@ -28,7 +28,7 @@ import glob
 import re
 
 from altium_files import ansi_script, read_altium_text, write_altium_text
-from outjob_parser import parse_outjob
+from outjob_parser import outjob_project, output_folder, parse_outjob, produced, snapshot
 import schematic_edit
 import script_lock
 import sheet_plan
@@ -3064,42 +3064,87 @@ async def get_component_primitives(ctx: Context, designators: list) -> str:
 
 
 @mcp.tool()
-async def run_output_jobs(ctx: Context, container_names: list) -> str:
+async def run_output_jobs(ctx: Context, container_names: list, outjob_path: str = "") -> str:
     """
-    Run specified output job containers
-    
+    Run output job containers and report the files each one wrote.
+
+    The OutJob is outjob_path (full path, opened if it is not) or else the focused OutJob, and Altium shows it
+    before the run, as the scripts that generated LED240's and Elch's sets did (this tool once reported success on
+    Elch's TEMPMODUL while writing nothing). Each container's output folder (the OutJob's output base path under its project's
+    folder) is listed before and after its run: the container succeeds when files appeared or changed there and
+    fails with the reason when none did. The OutJob is read as saved: save it in Altium first.
+
     Args:
-        container_names (list): List of container names to run
-    
+        container_names (list): names of the containers to run, e.g. ["JLC"]
+        outjob_path (str): full path of the .OutJob; empty for the focused one
+
     Returns:
-        str: JSON object with results of running the output jobs
+        str: JSON with success, outjob_path, project, containers [{name, success, output_folder,
+             files [{path, size}] (paths relative to output_folder), error}]
     """
-    logger.info(f"Running output jobs")
-    logger.info(f"Containers to run: {container_names}")
-    
-    # Execute the command in Altium to run output jobs
-    response = await altium_bridge.execute_command(
-        "run_output_jobs", 
-        {"container_names": container_names}
-    )
-    
-    # Check for success
-    if not response.get("success", False):
-        error_msg = response.get("error", "Unknown error")
-        logger.error(f"Error running output jobs: {error_msg}")
-        return json.dumps({"error": f"Failed to run output jobs: {error_msg}"})
-    
-    # Get the result data
-    result_data = response.get("result", {})
-    
-    logger.info(f"Output jobs execution completed")
-    
-    # If result_data is a string, it's already in JSON format
-    if isinstance(result_data, str):
-        return result_data
-    
-    # Otherwise, convert to JSON
-    return json.dumps(result_data, indent=2)
+    if not container_names or not all(isinstance(n, str) and n for n in container_names):
+        return json.dumps({"success": False, "error": "container_names must be a list of container names"})
+    if not outjob_path:
+        response = await altium_bridge.execute_command("get_output_job_containers", {})
+        found = response.get("result", {})
+        if isinstance(found, str):
+            try:
+                found = json.loads(found)
+            except ValueError:
+                found = {}
+        outjob_path = found.get("outjob_path", "") if response.get("success") else ""
+        if not outjob_path:
+            return json.dumps({"success": False, "error": "no OutJob is open in Altium: pass outjob_path ("
+                               + str(found.get("error") or response.get("error", "")) + ")"})
+    outjob = Path(outjob_path)
+    if not outjob.is_absolute() or outjob.suffix.lower() != ".outjob" or not outjob.is_file():
+        return json.dumps({"success": False, "error": f"outjob_path must be the full path of an existing .OutJob: "
+                                                      f"{outjob_path}"})
+    try:
+        settings = parse_outjob(outjob)
+        project = outjob_project(outjob)
+    except ValueError as e:
+        return json.dumps({"success": False, "error": str(e)})
+    containers = {c["name"]: c for c in settings["containers"]}
+    unknown = [n for n in container_names if n not in containers]
+    if unknown:
+        return json.dumps({"success": False, "error": f"{outjob.name} has no container {', '.join(unknown)}; "
+                                                      f"it has {', '.join(containers) or 'none'}"})
+    results = []
+    for name in container_names:
+        folder = output_folder(project, containers[name])
+        before = snapshot(folder)
+        response = await altium_bridge.execute_command(
+            "run_output_jobs", {"container_names": [name], "outjob_path": str(outjob)})
+        ran = response.get("result", {})
+        if isinstance(ran, str):
+            try:
+                ran = json.loads(ran)
+            except ValueError:
+                ran = {}
+        files = produced(before, snapshot(folder))
+        for _ in range(10):                     # Altium may still be closing the last file
+            if files or not response.get("success"):
+                break
+            await asyncio.sleep(0.5)
+            files = produced(before, snapshot(folder))
+        entry = {"name": name, "output_folder": str(folder), "files": files}
+        mine = next((c for c in ran.get("container_results", []) if c.get("container_name") == name), {})
+        if not response.get("success"):
+            entry["error"] = f"the bridge failed: {response.get('error', 'unknown error')}"
+        elif mine.get("error") or ran.get("error"):
+            entry["error"] = mine.get("error") or ran.get("error")
+        elif not files:
+            outputs = [o["name"] or o["type"] for o in settings["outputs"] if name in o["connected_containers"]]
+            entry["error"] = (f"Altium ran the container and nothing appeared or changed under {folder}: "
+                              + (f"its outputs ({', '.join(outputs)}) wrote nothing; is each output's document "
+                                 "saved and in the project, and the OutJob saved?" if outputs else
+                                 "no output of the OutJob is connected to it"))
+        entry["success"] = "error" not in entry
+        results.append(entry)
+    return json.dumps({"success": all(r["success"] for r in results), "outjob_path": str(outjob),
+                       "project": str(project), "containers": results}, indent=2, ensure_ascii=False)
+
 
 @mcp.tool()
 async def create_pcb_footprint(ctx: Context, footprint_name: str, description: str, pads: list, courtyard_x_mm: float = 0, courtyard_y_mm: float = 0) -> str:

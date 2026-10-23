@@ -21,7 +21,7 @@
     },
     {
       "name": "run_output_jobs",
-      "description": "Run specified output job containers"
+      "description": "Run output job containers and report the files each one wrote"
     },
     {
       "name": "get_outjob_settings",

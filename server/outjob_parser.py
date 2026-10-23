@@ -4,6 +4,7 @@ Kept free of Altium and Windows imports so it can be unit tested on its own
 and used on a file that is not open in Altium.
 """
 import configparser
+import os
 import re
 from pathlib import Path
 
@@ -180,3 +181,46 @@ def parse_outjob(path) -> dict:
         "containers": containers,
         "outputs": outputs,
     }
+
+
+def outjob_project(outjob) -> Path:
+    """The .PrjPcb that lists the OutJob, searched in the OutJob's folder and the three above it: Altium writes a
+    container's files under the project's folder."""
+    outjob = Path(outjob).resolve()
+    want = os.path.normcase(str(outjob))
+    for folder in outjob.parents[:4]:
+        for prj in sorted(folder.glob("*.PrjPcb")):
+            ini = _read_ini(prj)
+            for section in ini.sections():
+                if section.startswith("Document") and "DocumentPath" in ini[section]:
+                    doc = (prj.parent / ini[section]["DocumentPath"].replace("\\", "/")).resolve()
+                    if os.path.normcase(str(doc)) == want:
+                        return prj
+    raise ValueError(f"no .PrjPcb in {outjob.parent} or the three folders above lists {outjob.name}; "
+                     "Altium writes a container's files relative to the project")
+
+
+def output_folder(project, container) -> Path:
+    """Where a container writes: its output base path under the project's folder (Altium's default when empty).
+    A media name, or an output type, adds subfolders below it."""
+    base = container.get("base_path") or f"Project Outputs for {Path(project).stem}"
+    base = Path(base.replace("\\", "/"))
+    return base if base.is_absolute() else Path(project).parent / base
+
+
+def snapshot(folder) -> dict:
+    """{relative posix path: (size, mtime_ns)} of every file under folder; {} when it does not exist."""
+    folder = Path(folder)
+    if not folder.is_dir():
+        return {}
+    out = {}
+    for f in folder.rglob("*"):
+        if f.is_file():
+            st = f.stat()
+            out[f.relative_to(folder).as_posix()] = (st.st_size, st.st_mtime_ns)
+    return out
+
+
+def produced(before: dict, after: dict) -> list:
+    """[{path, size}] of the files that appeared or changed between two snapshots."""
+    return [{"path": p, "size": after[p][0]} for p in sorted(after) if before.get(p) != after[p]]

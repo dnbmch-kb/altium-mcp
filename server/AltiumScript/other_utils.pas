@@ -171,7 +171,8 @@ begin
        (CommandName = 'get_erc_violations') or
        (CommandName = 'edit_schematic') or
        (CommandName = 'annotate_schematic') or
-       (CommandName = 'open_project') then
+       (CommandName = 'open_project') or
+       (CommandName = 'run_output_jobs') then
     begin
         Result := True;
         Exit;
@@ -649,203 +650,6 @@ begin
     end;
 end;
 
-// Run selected output job containers with simplified logic
-function RunOutputJobs(ContainerNames: TStringList, ROOT_DIR: String): String;
-var
-    OutJobPath: String;
-    IniFile: TIniFile;
-    ContainerName, ContainerAction, RelativePath: String;
-    G, J: Integer;
-    S: String;
-    ResultProps: TStringList;
-    ContainerResults: TStringList;
-    ContainerResultProps: TStringList;
-    I: Integer;
-    ContainerFound: Boolean;
-    SuccessCount: Integer;
-    OutJobDoc: IServerDocument;
-    OutputLines: TStringList;
-begin
-    // Get the path of the first open OutJob
-    OutJobPath := GetOpenOutputJob();
-
-    // Exit if no open OutJob was found
-    if OutJobPath = '' then
-    begin
-        ResultProps := TStringList.Create;
-        try
-            AddJSONBoolean(ResultProps, 'success', False);
-            AddJSONProperty(ResultProps, 'error', 'No open OutJob document found');
-            Result := BuildJSONObject(ResultProps);
-        finally
-            ResultProps.Free;
-        end;
-        Exit;
-    end;
-
-    // Create results
-    ResultProps := TStringList.Create;
-    ContainerResults := TStringList.Create;
-    SuccessCount := 0;
-
-    try
-        // Add the OutJob path to the result
-        AddJSONProperty(ResultProps, 'outjob_path', OutJobPath);
-
-        // Open the OutJob document
-        if not(Client.IsDocumentOpen(OutJobPath)) then
-        begin
-            OutJobDoc := Client.OpenDocument('OUTPUTJOB', OutJobPath);
-            OutJobDoc.Focus();
-        end
-        else
-        begin
-            OutJobDoc := Client.GetDocumentByPath(OutJobPath);
-            OutJobDoc.Focus();
-        end;
-
-        // Exit if we can't open the OutJob document
-        if OutJobDoc = Nil then
-        begin
-            AddJSONBoolean(ResultProps, 'success', False);
-            AddJSONProperty(ResultProps, 'error', 'Could not open OutJob document: ' + OutJobPath);
-            Result := BuildJSONObject(ResultProps);
-            Exit;
-        end;
-
-        // Open the OutJob file (it's just an INI file)
-        IniFile := TIniFile.Create(OutJobPath);
-        try
-            // Process each requested container
-            for I := 0 to ContainerNames.Count - 1 do
-            begin
-                ContainerFound := False;
-                ContainerResultProps := TStringList.Create;
-
-                try
-                    // Add container name to results
-                    AddJSONProperty(ContainerResultProps, 'container_name', ContainerNames[I]);
-
-                    // Iterate through groups and containers to find the matching one
-                    G := 1;
-                    while True do
-                    begin
-                        S := 'OutputGroup'+IntToStr(G);
-
-                        J := 1;
-                        while True do
-                        begin
-                            ContainerName := IniFile.ReadString(S, 'OutputMedium' + IntToStr(J), DEFAULT);
-
-                            // Exit inner loop if we've reached the default value
-                            if ContainerName = DEFAULT then
-                                break;
-
-                            // Check if this is one of the containers we want to run
-                            if ContainerName = ContainerNames[I] then
-                            begin
-                                ContainerFound := True;
-                                ContainerAction := IniFile.ReadString(S, 'OutputMedium' + IntToStr(J) + '_Type', DEFAULT);
-                                RelativePath := IniFile.ReadString('PublishSettings', 'OutputBasePath' + IntToStr(J), '');
-
-                                // Ensure document is focused
-                                OutJobDoc.Focus();
-
-                                // Run the container based on its type
-                                if ContainerAction = 'GeneratedFiles' then
-                                begin
-                                    // Run GenerateFiles
-                                    ResetParameters;
-                                    AddStringParameter('Action', 'Run');
-                                    AddStringParameter('OutputMedium', ContainerName);
-                                    AddStringParameter('ObjectKind', 'OutputBatch');
-                                    AddStringParameter('OutputBasePath', RelativePath);
-                                    RunProcess('WorkspaceManager:GenerateReport');
-
-                                    // Assume success
-                                    AddJSONBoolean(ContainerResultProps, 'success', True);
-                                    SuccessCount := SuccessCount + 1;
-                                end
-                                else if ContainerAction = 'Publish' then
-                                begin
-                                    // Run PublishToPDF with simpler parameters
-                                    ResetParameters;
-                                    AddStringParameter('Action', 'PublishToPDF');
-                                    AddStringParameter('OutputMedium', ContainerName);
-                                    AddStringParameter('ObjectKind', 'OutputBatch');
-                                    AddStringParameter('OutputBasePath', RelativePath);
-                                    AddStringParameter('DisableDialog', 'True');
-                                    RunProcess('WorkspaceManager:Print');
-
-                                    // Assume success
-                                    AddJSONBoolean(ContainerResultProps, 'success', True);
-                                    SuccessCount := SuccessCount + 1;
-                                end
-                                else
-                                begin
-                                    // Unknown action type
-                                    AddJSONBoolean(ContainerResultProps, 'success', False);
-                                    AddJSONProperty(ContainerResultProps, 'error', 'Unknown container action type: ' + ContainerAction);
-                                end;
-
-                                // Add output path info
-                                AddJSONProperty(ContainerResultProps, 'relative_path', RelativePath);
-
-                                // Break out after processing the container
-                                break;
-                            end;
-
-                            Inc(J);
-                        end;
-
-                        // If we already found and processed the container, break out
-                        if ContainerFound then
-                            break;
-
-                        // Exit outer loop if we've processed all groups
-                        if ContainerName = DEFAULT then
-                            break;
-
-                        Inc(G);
-                    end;
-
-                    // Handle container not found
-                    if not ContainerFound then
-                    begin
-                        AddJSONBoolean(ContainerResultProps, 'success', False);
-                        AddJSONProperty(ContainerResultProps, 'error', 'Container not found: ' + ContainerNames[I]);
-                    end;
-
-                    // Add this container result to the results array
-                    ContainerResults.Add(BuildJSONObject(ContainerResultProps, 1));
-                finally
-                    ContainerResultProps.Free;
-                end;
-            end;
-        finally
-            IniFile.Free;
-        end;
-
-        // Add summary results
-        AddJSONBoolean(ResultProps, 'success', SuccessCount > 0);
-        AddJSONInteger(ResultProps, 'total_containers', ContainerNames.Count);
-        AddJSONInteger(ResultProps, 'successful_containers', SuccessCount);
-        ResultProps.Add(BuildJSONArray(ContainerResults, 'container_results'));
-
-        // Build and return the final JSON result
-        OutputLines := TStringList.Create;
-        try
-            OutputLines.Text := BuildJSONObject(ResultProps);
-            Result := WriteJSONToFile(OutputLines, ROOT_DIR + 'temp_run_output_jobs.json');
-        finally
-            OutputLines.Free;
-        end;
-    finally
-        ResultProps.Free;
-        ContainerResults.Free;
-    end;
-end;
-
 // Helper function to check if a document is open
 function IsOpenDoc(Path: String): Boolean;
 var
@@ -934,6 +738,133 @@ begin
     begin
         Client.ShowDocument(Result);
         Sleep(500);
+    end;
+end;
+
+// Run output job containers of an OutJob: OutJobPath, else the focused or first open one. The OutJob is shown
+// first and no output base path is passed, as in the two scripts that generated LED240's and Elch's JLC sets;
+// the tool had reported success with nothing written on Elch's TEMPMODUL (2026-10-23). "ran" says the process
+// was started; the server lists the files each container wrote.
+function RunOutputJobs(ContainerNames: TStringList, ROOT_DIR: String, OutJobPath: String): String;
+var
+    IniFile: TIniFile;
+    ContainerName, ContainerAction, RelativePath: String;
+    G, J, I: Integer;
+    S: String;
+    ResultProps: TStringList;
+    ContainerResults: TStringList;
+    ContainerResultProps: TStringList;
+    ContainerFound: Boolean;
+    OutJobDoc: IServerDocument;
+    OutputLines: TStringList;
+begin
+    if (OutJobPath = '') then OutJobPath := GetOpenOutputJob();
+    if (OutJobPath = '') then
+    begin
+        Result := '{"success": false, "error": "No open OutJob document found"}';
+        Exit;
+    end;
+
+    // Found open first: opening an open document again reloads it and drops its unsaved changes
+    OutJobDoc := OpenLibraryDocument('OUTPUTJOB', OutJobPath);
+    if (OutJobDoc = Nil) then
+    begin
+        Result := '{"success": false, "error": "' + JSONEscapeString('Could not open OutJob document: ' + OutJobPath) + '"}';
+        Exit;
+    end;
+    OutJobDoc.Focus;
+
+    ResultProps := TStringList.Create;
+    ContainerResults := TStringList.Create;
+    try
+        AddJSONProperty(ResultProps, 'outjob_path', OutJobPath);
+
+        // The OutJob file is an INI file
+        IniFile := TIniFile.Create(OutJobPath);
+        try
+            for I := 0 to ContainerNames.Count - 1 do
+            begin
+                ContainerFound := False;
+                ContainerResultProps := TStringList.Create;
+                try
+                    AddJSONProperty(ContainerResultProps, 'container_name', ContainerNames[I]);
+                    G := 1;
+                    while True do
+                    begin
+                        S := 'OutputGroup' + IntToStr(G);
+                        J := 1;
+                        while True do
+                        begin
+                            ContainerName := IniFile.ReadString(S, 'OutputMedium' + IntToStr(J), DEFAULT);
+                            if ContainerName = DEFAULT then
+                                break;
+                            if ContainerName = ContainerNames[I] then
+                            begin
+                                ContainerFound := True;
+                                ContainerAction := IniFile.ReadString(S, 'OutputMedium' + IntToStr(J) + '_Type', DEFAULT);
+                                OutJobDoc.Focus;
+                                if ContainerAction = 'GeneratedFiles' then
+                                begin
+                                    ResetParameters;
+                                    AddStringParameter('Action', 'Run');
+                                    AddStringParameter('OutputMedium', ContainerName);
+                                    AddStringParameter('ObjectKind', 'OutputBatch');
+                                    RunProcess('WorkspaceManager:GenerateReport');
+                                    AddJSONBoolean(ContainerResultProps, 'ran', True);
+                                end
+                                else if ContainerAction = 'Publish' then
+                                begin
+                                    RelativePath := IniFile.ReadString('PublishSettings', 'OutputBasePath' + IntToStr(J), '');
+                                    ResetParameters;
+                                    AddStringParameter('Action', 'PublishToPDF');
+                                    AddStringParameter('OutputMedium', ContainerName);
+                                    AddStringParameter('ObjectKind', 'OutputBatch');
+                                    AddStringParameter('OutputBasePath', RelativePath);
+                                    AddStringParameter('DisableDialog', 'True');
+                                    RunProcess('WorkspaceManager:Print');
+                                    AddJSONBoolean(ContainerResultProps, 'ran', True);
+                                end
+                                else
+                                begin
+                                    AddJSONBoolean(ContainerResultProps, 'ran', False);
+                                    AddJSONProperty(ContainerResultProps, 'error', 'Unknown container action type: ' + ContainerAction);
+                                end;
+                                break;
+                            end;
+                            Inc(J);
+                        end;
+                        if ContainerFound then
+                            break;
+                        if ContainerName = DEFAULT then
+                            break;
+                        Inc(G);
+                    end;
+                    if not ContainerFound then
+                    begin
+                        AddJSONBoolean(ContainerResultProps, 'ran', False);
+                        AddJSONProperty(ContainerResultProps, 'error', 'Container not found: ' + ContainerNames[I]);
+                    end;
+                    ContainerResults.Add(BuildJSONObject(ContainerResultProps, 1));
+                finally
+                    ContainerResultProps.Free;
+                end;
+            end;
+        finally
+            IniFile.Free;
+        end;
+
+        AddJSONBoolean(ResultProps, 'success', True);
+        ResultProps.Add(BuildJSONArray(ContainerResults, 'container_results'));
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := WriteJSONToFile(OutputLines, ROOT_DIR + 'temp_run_output_jobs.json');
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        ResultProps.Free;
+        ContainerResults.Free;
     end;
 end;
 

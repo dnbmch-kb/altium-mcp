@@ -121,7 +121,7 @@ The server provides several tools to interact with Altium Designer:
 
 ### Output Jobs
 - `get_output_job_containers`: Using currently open .OutJob file, reads all available output containers
-- `run_output_jobs`: Pass a list of output job container names from the currently open .OutJob to run any number of them. `.OutJob` must be the currently focused document.
+- `run_output_jobs`: Run containers of an OutJob (`outjob_path`, or the focused OutJob) and get back the files each one wrote, with their sizes. The tool once reported success on Elch's TEMPMODUL while writing nothing (2026-10-23); the two scripts that generated LED240's and Elch's sets show the OutJob first and pass no output base path, and the tool now does the same. Each container's output folder (its output base path under the project's folder) is listed before and after; a container that wrote nothing fails with the reason. The OutJob is read as saved.
 - `get_outjob_settings`: Read any `.OutJob` file from disk (no Altium needed, the OutJob does not have to be open) and return its containers (output paths, file name expression, add-to-project) and outputs (connected containers, variant, document) with decoded settings: Gerber units/format/origin and the plotted and "add to all plots" layers decoded from Altium layer IDs, NC Drill, IPC-D-356 test points, pick and place and print layers. Use it to audit fabrication settings before generating. Reads the saved file, so unsaved changes in Altium are not visible.
 
 ### Project & Validation

@@ -854,13 +854,17 @@ var
     ParamValue: String;
     i: Integer;
     ContainersList: TStringList;
+    OutJobPath: String;
 begin
     ContainersList := TStringList.Create;
+    OutJobPath := '';
     
     try
         // Parse parameters from the request
         for i := 0 to RequestData.Count - 1 do
         begin
+            if (Pos('"outjob_path"', RequestData[i]) > 0) then
+                OutJobPath := JSONLineValue(RequestData[i]);
             if (Pos('"container_names"', RequestData[i]) > 0) then
             begin
                 // Parse the array in the next lines
@@ -884,7 +888,7 @@ begin
         
         if ContainersList.Count > 0 then
         begin
-            Result := RunOutputJobs(ContainersList, ROOT_DIR);
+            Result := RunOutputJobs(ContainersList, ROOT_DIR, OutJobPath);
         end
         else
         begin
