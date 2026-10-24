@@ -493,50 +493,65 @@ begin
     EdRegister(Obj);
 end;
 
-// The footprint model: the first PCBLIB model renamed, or a new one. Location, the full path of a PcbLib, is for a
-// part without a database row: the model takes the footprint from that library by path, not from the component
-// library, which has no row to give it (the ECO reported Footprint Not Found, dss-r0-aiv CTRL, 2026-10-24).
-procedure EdSetModel(Comp: ISch_Component; Footprint: String; Location: String);
+// The footprint models: every PCBLIB model replaced by Footprints, 'F1;F2;...', F1 current and the rest its alternates
+// (a DbLib row's Footprint Ref 2 onward). Renaming the first and keeping the others left old models behind, naming
+// footprints no library holds (the MCB's legacy resistors carried four), which makes Update From Libraries refuse the
+// board. Location, the full path of a PcbLib, is for a part without a database row: each model takes its footprint
+// from that library by path, not from the component library, which has no row to give it (the ECO reported Footprint
+// Not Found, dss-r0-aiv CTRL, 2026-10-24).
+procedure EdSetModel(Comp: ISch_Component; Footprints: String; Location: String);
 var
-    Iter : ISch_Iterator;
-    Impl : ISch_Implementation;
-    Done : Boolean;
+    Iter      : ISch_Iterator;
+    Impl, Old : ISch_Implementation;
+    Rest      : String;
+    Name      : String;
+    P         : Integer;
+    First     : Boolean;
 begin
-    if (Footprint = '') then Exit;
-    Done := False;
-    Iter := Comp.SchIterator_Create;
-    Iter.AddFilter_ObjectSet(MkSet(eImplementation));
-    Impl := Iter.FirstSchObject;
-    while (Impl <> nil) do
-    begin
-        if (UpperCase(Impl.ModelType) = 'PCBLIB') and (not Done) then
+    if (Footprints = '') then Exit;
+    repeat
+        Old := nil;
+        Iter := Comp.SchIterator_Create;
+        Iter.AddFilter_ObjectSet(MkSet(eImplementation));
+        Impl := Iter.FirstSchObject;
+        while (Impl <> nil) do
         begin
-            Impl.ModelName := Footprint;
-            Impl.ClearAllDatafileLinks;
-            Impl.AddDataFileLink(Footprint, Location, 'PCBLib');
-            if (Location <> '') then Impl.UseComponentLibrary := False;
-            Impl.IsCurrent := True;
-            Done := True;
+            if (Old = nil) and (UpperCase(Impl.ModelType) = 'PCBLIB') then Old := Impl;
+            Impl := Iter.NextSchObject;
         end;
-        Impl := Iter.NextSchObject;
-    end;
-    Comp.SchIterator_Destroy(Iter);
-    if not Done then
+        Comp.SchIterator_Destroy(Iter);
+        if (Old <> nil) then Comp.RemoveSchImplementation(Old);
+    until (Old = nil);
+    Rest := Footprints;
+    First := True;
+    while (Rest <> '') do
     begin
+        P := Pos(';', Rest);
+        if (P = 0) then
+        begin
+            Name := Rest;
+            Rest := '';
+        end
+        else
+        begin
+            Name := Copy(Rest, 1, P - 1);
+            Rest := Copy(Rest, P + 1, Length(Rest));
+        end;
         Impl := Comp.AddSchImplementation;
-        Impl.ModelName := Footprint;
+        Impl.ModelName := Name;
         Impl.ModelType := 'PCBLIB';
-        Impl.AddDataFileLink(Footprint, Location, 'PCBLib');
-        Impl.IsCurrent := True;
+        Impl.AddDataFileLink(Name, Location, 'PCBLib');
+        Impl.IsCurrent := First;
         Impl.UseComponentLibrary := (Location = '');
+        First := False;
     end;
 end;
 
 // Every model of a part linked to an IntLib or DbLib taken from that library ("Use Component Library"), as a
 // hand-placed part's are. A copy out of a SchLib keeps the symbol's models on "any library", and the ECO then
 // searches every installed library for each one: the raw-head adapter's ECO ran 40 minutes and froze Altium.
-// The footprint given a library path (Location) keeps it.
-procedure EdBindModels(Comp: ISch_Component; Footprint: String; Location: String);
+// Footprints given a library path (Location) keep it.
+procedure EdBindModels(Comp: ISch_Component; Location: String);
 var
     Iter : ISch_Iterator;
     Impl : ISch_Implementation;
@@ -549,8 +564,7 @@ begin
     Impl := Iter.FirstSchObject;
     while (Impl <> nil) do
     begin
-        if (Location = '') or (UpperCase(Impl.ModelType) <> 'PCBLIB') or (Impl.ModelName <> Footprint) then
-            Impl.UseComponentLibrary := True;
+        if (Location = '') or (UpperCase(Impl.ModelType) <> 'PCBLIB') then Impl.UseComponentLibrary := True;
         Impl := Iter.NextSchObject;
     end;
     Comp.SchIterator_Destroy(Iter);
@@ -582,20 +596,29 @@ begin
     Comp.SchIterator_Destroy(Iter);
 end;
 
-// LINK fields: link_library|db_table|design_item|footprint|comment starting at field F; the footprint's library
-// path in field L, empty in a spec without it
+// LINK fields: link_library|db_table|design_item|footprints|comment starting at field F; the footprints' library
+// path in field L, empty in a spec without it. A library given names the whole link: its table replaces the old one,
+// or clears it for an IntLib, so a part relinked to another library keeps no old table.
 procedure EdSetLink(Comp: ISch_Component; Rec: String; F: Integer; L: Integer);
+var
+    Table : String;
 begin
-    if (GetFieldFromPipeString(Rec, F) <> '') then Comp.SourceLibraryName := GetFieldFromPipeString(Rec, F);
-    if (GetFieldFromPipeString(Rec, F + 1) <> '') then
+    Table := GetFieldFromPipeString(Rec, F + 1);
+    if (GetFieldFromPipeString(Rec, F) <> '') then
     begin
-        Comp.DatabaseTableName := GetFieldFromPipeString(Rec, F + 1);
+        Comp.SourceLibraryName := GetFieldFromPipeString(Rec, F);
+        Comp.DatabaseTableName := Table;
+        Comp.UseDBTableName := (Table <> '');
+    end
+    else if (Table <> '') then
+    begin
+        Comp.DatabaseTableName := Table;
         Comp.UseDBTableName := True;
     end;
     if (GetFieldFromPipeString(Rec, F + 2) <> '') then Comp.DesignItemId := GetFieldFromPipeString(Rec, F + 2);
     EdSetModel(Comp, GetFieldFromPipeString(Rec, F + 3), GetFieldFromPipeString(Rec, L));
     if (GetFieldFromPipeString(Rec, F + 4) <> '') then Comp.Comment.Text := GetFieldFromPipeString(Rec, F + 4);
-    EdBindModels(Comp, GetFieldFromPipeString(Rec, F + 3), GetFieldFromPipeString(Rec, L));
+    EdBindModels(Comp, GetFieldFromPipeString(Rec, L));
 end;
 
 procedure EdSetParam(Comp: ISch_Component; PName: String; PVal: String);

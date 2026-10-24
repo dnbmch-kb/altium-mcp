@@ -149,6 +149,22 @@ class EditSpecTest(unittest.TestCase):
     def test_label_to_port_takes_the_power_style(self):
         self.assertIn("LABEL_TO_PORT|PZWFJNSF|3V3|2|1|1", self.spec([{"op": "label_to_port", "uid": "PZWFJNSF", "text": "3V3"}]))
 
+    def test_a_row_with_alternates_sends_every_footprint_the_first_current(self):
+        op = {"op": "relink", "comp": "uid:MOLEXJ1A", "link_library": "house.DbLib", "db_table": "molex_microfit",
+              "design_item": "430450400", "footprint": "MOL_MF3_2X02_RA_THT",
+              "alternate_footprints": ["MOL_MF3_2X02_VERT_OR_RA_THT"]}
+        lines = self.spec([op])
+        self.assertIn("RELINK|uid:MOLEXJ1A|house.DbLib|molex_microfit|430450400|"
+                      "MOL_MF3_2X02_RA_THT;MOL_MF3_2X02_VERT_OR_RA_THT|", lines)
+        self.assertIn("RELINK|uid:MOLEXJ1A|house.DbLib|molex_microfit|430450400|MOL_MF3_2X02_RA_THT|",
+                      self.spec([dict(op, alternate_footprints=[])]))
+        for bad, msg in ((dict(op, footprint=None), "needs footprint, the current one"),
+                         (dict(op, alternate_footprints="MOL_MF3_2X02_VERT_OR_RA_THT"), "is a list"),
+                         (dict(op, alternate_footprints=["A;B"]), "may not contain ';' or repeat"),
+                         (dict(op, alternate_footprints=["MOL_MF3_2X02_RA_THT"]), "may not contain ';' or repeat")):
+            with self.subTest(msg=msg), self.assertRaisesRegex(ValueError, msg):
+                self.spec([bad])
+
     def test_entry_and_relink_and_no_erc(self):
         lines = self.spec([{"op": "attach_entry", "symbol": "RS422_RX", "entry": "DI", "net": "GND"},
                            {"op": "relink", "comp": "uid:LRAKJBWM", "link_library": "Res-Gen.DbLib",

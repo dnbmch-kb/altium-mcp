@@ -122,8 +122,25 @@ def draw_ops(ops):
     return out
 
 
+def _footprints(op, what):
+    """The footprint field: footprint, then alternate_footprints (a DbLib row's Footprint Ref 2 onward), ';'-joined;
+    the part's footprint models become exactly these, the first current."""
+    alternates = op.get("alternate_footprints") or ()
+    if op.get("footprint") in (None, ""):
+        if alternates:
+            raise ValueError(f"{what}: alternate_footprints needs footprint, the current one")
+        return ""
+    if isinstance(alternates, str):
+        raise ValueError(f"{what}: alternate_footprints is a list of footprint names")
+    names = [_text(n, f"{what} footprint") for n in (op["footprint"], *alternates)]
+    if any(";" in n for n in names) or len(set(names)) != len(names):
+        raise ValueError(f"{what}: footprint names may not contain ';' or repeat: {names}")
+    return ";".join(names)
+
+
 def _link_fields(op, what):
-    return "|".join(_text(op[k], f"{what} {k}") if op.get(k) not in (None, "") else ""
+    return "|".join(_footprints(op, what) if k == "footprint" else
+                    _text(op[k], f"{what} {k}") if op.get(k) not in (None, "") else ""
                     for k in ("link_library", "db_table", "design_item", "footprint", "comment"))
 
 
