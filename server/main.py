@@ -2983,7 +2983,13 @@ async def edit_schematic(ctx: Context, sheet: str, ops: list, power_nets: list =
             {"op": "replace", "comp", "symbol_library", "lib_ref", "pin_map": {old: new},
              "nets": {new_pin: net}, place's link fields, "description", "parameters": {}}
                                                          every mapped new pin needs its net: the old pin's end
-                                                         gets the same net, so the old wiring keeps it
+                                                         gets the same net, so the old wiring keeps it. The new
+                                                         part takes the old origin, never moved; refused, nothing
+                                                         changed, when a pin the op names is not on the new
+                                                         symbol, its body overlaps another part's, or a pin end
+                                                         lands on anything but the old end of the pin mapped onto
+                                                         it. An old pin connected but in no pin_map entry is an
+                                                         error naming it: its wiring is left without a pin
             {"op": "relink", "comp", "link_library", "db_table", "design_item", "footprint",
              "alternate_footprints", "footprint_library", "comment", "description", "parameters": {}}
                                                          changes a part's library link and keeps its symbol: a
@@ -3023,9 +3029,12 @@ async def replace_component(ctx: Context, sheet: str, comp: str, symbol_library:
     """
     Swap a placed part for another symbol and keep its connections, mapping pins by FUNCTION.
 
-    The old pin ends get net labels carrying each pin's net, the old part goes, the new one takes its place
-    (stepped right until no pin lands on existing wiring) and every new pin gets a stub with its net. Map by
-    function, never by number: two diode symbols can number the cathode differently.
+    The old pin ends get net labels carrying each pin's net, the old part goes, the new one takes its origin,
+    never moved, and every new pin gets a stub with its net. Refused, nothing changed, when the new part does not
+    fit there: a pin the call names missing on the new symbol, its body over another part's, a pin end on
+    anything but the old end of the pin mapped onto it. An old pin connected but in no pin_map entry is an error
+    naming it, its wiring left without a pin. Map by function, never by number: two diode symbols can number the
+    cathode differently.
 
     Args:
         sheet: full path of the .SchDoc.
