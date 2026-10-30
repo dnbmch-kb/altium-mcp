@@ -21,7 +21,8 @@ var
     I1, I2, I3 : Integer;
     B1         : Integer;
     Obj1, Obj2, Obj3, Obj4, Obj5 : IDispatch;
-    List1      : TStringList;
+    List1      : TStringList;   // an empty list from Run, which frees it after the script; one the script
+                                // creates in its place it frees itself
     IntMan     : IIntegratedLibraryManager;
     DbDoc      : IDatabaseLibDocument;
 
@@ -43,10 +44,13 @@ var
     SbLog      : TStringList;
     SbLogPath, SbOutPath, SbFocused : String;
     SbK        : Integer;
+    SbList1    : TStringList;   // the list List1 starts as, freed by Run whatever the script did with List1
 begin
     LogPath := 'C:\Users\Public\altium_mcp\sandbox_log.txt';
     OutPath := 'C:\Users\Public\altium_mcp\sandbox_result.json';
     LogLines := TStringList.Create;
+    SbList1 := TStringList.Create;
+    List1 := SbList1;
     ResultText := '{"sandbox": "no result set"}';
     SandboxLog('sandbox start');
 
@@ -60,6 +64,7 @@ begin
     end;
 
     SandboxLog('sandbox end');
+    SbList1.Free;
 
     // The sandbox's script project leaves the operator's workspace with the run (house rule: after a release it
     // holds nothing an agent opened), and the next run opens it fresh from disk: closed by its path the way

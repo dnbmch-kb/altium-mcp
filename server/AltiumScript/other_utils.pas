@@ -4,14 +4,13 @@ const
 
     // One layer of a PCB Print (PrintView); %L% is the layer's name
     PRINT_LAYER_RECORD = 'CArc=Full|CFill=Full|Comment=Full|Coordinate=Full|CPad=Full|CRegion=Full|CText=Full|CTrack=Full|CVia=Full|Designator=Full|Dimension=Full|DLayer1=TopLayer|DLayer2=BottomLayer|DrillType=Regular|FArc=Full|FFill=Full|FPad=Full|FRegion=Full|FText=Full|FTrack=Full|FVia=Full|Layer=%L%|Polygon=Full|PrintOutIndex=0|Record=PcbPrintLayer';
-    PROGRESS_KEEP = 400;       // progress records kept in the file; the first ('taken') always stays
 
 var
     // Why the last EnsureDocumentFocused call failed; reported to the server.
     FocusFailure : String;
     // The running mailbox request's progress (BridgeProgress): '' while a single-file request runs, which has none
     PROGRESS_FILE : String;
-    ProgressLines : TStringList;
+    ProgressFile  : TextFile;
     ProgressSeq   : Integer;
     ProgressT0    : Integer;
     // The libraries the running request opened (OpenLibraryDocument); HandleRequest closes them before it answers
@@ -36,33 +35,32 @@ begin
 end;
 
 // Progress records for the server waiting on this request (server/mailbox.py): one line each,
-// seq|elapsed ms|step|count|total, the file rewritten whole. The server waits while records keep landing and gives
-// up only when none lands for its stall time, so a long batch reports each step. A write that fails while the
-// server is reading the file is skipped; the record goes out with the next one.
+// seq|elapsed ms|step|count|total, appended and flushed. The server waits while records keep landing and gives up
+// only when none lands for its stall time, so a long batch reports each step. The file is created and opened once per
+// request, while nothing can hold it, and every record goes through that handle, which shares reading: a reader holding
+// the file open (the server, a watcher) cannot fail a write. A file recreated per record fails while any reader holds
+// it: EFCreateError, whose box stopped a drawing pass (ugv-pcb SCB capture, 2026-10-26).
 procedure BridgeProgressBegin(Path: String);
 begin
     PROGRESS_FILE := Path;
-    ProgressLines := TStringList.Create;
     ProgressSeq := 0;
     ProgressT0 := GetTickCount;
+    AssignFile(ProgressFile, PROGRESS_FILE);
+    Rewrite(ProgressFile);
 end;
 
 procedure BridgeProgress(Step: String; Count: Integer; Total: Integer);
 begin
     if (PROGRESS_FILE = '') then Exit;
     ProgressSeq := ProgressSeq + 1;
-    ProgressLines.Add(IntToStr(ProgressSeq) + '|' + IntToStr(GetTickCount - ProgressT0) + '|' +
-                      StringReplace(Step, '|', '/', REPLACEALL) + '|' + IntToStr(Count) + '|' + IntToStr(Total));
-    while (ProgressLines.Count > PROGRESS_KEEP) do ProgressLines.Delete(1);
-    try
-        ProgressLines.SaveToFile(PROGRESS_FILE);
-    except
-    end;
+    WriteLn(ProgressFile, IntToStr(ProgressSeq) + '|' + IntToStr(GetTickCount - ProgressT0) + '|' +
+                          StringReplace(Step, '|', '/', REPLACEALL) + '|' + IntToStr(Count) + '|' + IntToStr(Total));
+    Flush(ProgressFile);
 end;
 
 procedure BridgeProgressEnd;
 begin
-    if (PROGRESS_FILE <> '') then ProgressLines.Free;
+    if (PROGRESS_FILE <> '') then CloseFile(ProgressFile);
     PROGRESS_FILE := '';
 end;
 

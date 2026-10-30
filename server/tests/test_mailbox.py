@@ -15,6 +15,8 @@ import time
 import unittest
 from pathlib import Path
 
+import win32file
+
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 import mailbox  # noqa: E402
@@ -69,23 +71,30 @@ class FakeBridge:
 
     def serve(self, rid, folder):
         self.served.append(rid)
-        records = []
+        # progress.log as BridgeProgress writes it: created once for the request, each record appended through that
+        # handle, which shares reading only (a Delphi text file)
+        log = win32file.CreateFile(str(folder / "progress.log"), win32file.GENERIC_WRITE, win32file.FILE_SHARE_READ,
+                                   None, win32file.CREATE_ALWAYS, 0, None)
+        seq = []
 
         def progress(step, count, total):
-            records.append(f"{len(records) + 1}|{len(records) * 10}|{step}|{count}|{total}")
-            (folder / "progress.log").write_text("\r\n".join(records) + "\r\n", encoding="cp1252")
+            seq.append(step)
+            win32file.WriteFile(log, f"{len(seq)}|{(len(seq) - 1) * 10}|{step}|{count}|{total}\r\n".encode("cp1252"))
 
-        progress("taken", 0, 0)
-        if self.stop_after_take:
-            return
-        request = json.loads(read_altium_text(folder / "request.json"))
-        for i in range(1, self.steps + 1):
-            time.sleep(self.step_seconds)
-            progress(f"place R{i}", i, self.steps)
-        (folder / "response.tmp").write_text(json.dumps({"success": True, "request_id": rid,
-                                                         "result": self.answer(request)}), encoding="cp1252")
-        progress("answered", 0, 0)
-        self.answered.append(folder)
+        try:
+            progress("taken", 0, 0)
+            if self.stop_after_take:
+                return
+            request = json.loads(read_altium_text(folder / "request.json"))
+            for i in range(1, self.steps + 1):
+                time.sleep(self.step_seconds)
+                progress(f"place R{i}", i, self.steps)
+            (folder / "response.tmp").write_text(json.dumps({"success": True, "request_id": rid,
+                                                             "result": self.answer(request)}), encoding="cp1252")
+            progress("answered", 0, 0)
+            self.answered.append(folder)
+        finally:
+            log.Close()
 
 
 def take_lock(path, pid):
@@ -172,6 +181,34 @@ class WaitTest(Fixture):
         self.assertEqual(state, "answered")
         self.assertGreater(time.monotonic() - t0, 1.5)
         self.assertGreater(len(seen), 20)
+
+    def test_a_watcher_holding_the_progress_log_open_stops_no_record(self):
+        # ugv-pcb SCB capture (2026-10-26): a reader holding progress.log made the bridge's rewrite of it fail
+        # (EFCreateError) in the middle of a drawing pass; the bridge now holds the one handle it writes through
+        mail = mailbox.Mail(self.root, "edit_schematic", {}, request_id=f"{os.getpid()}-1-1")
+        mail.post()
+        take_lock(self.lock, os.getpid())
+        held, done = [], threading.Event()
+
+        def watcher():
+            while not done.is_set() and not held:
+                try:
+                    held.append(open(mail.folder / "progress.log", "rb"))
+                except OSError:
+                    time.sleep(0.005)
+            done.wait()
+            for f in held:
+                f.close()
+        threading.Thread(target=watcher).start()
+        threading.Thread(target=FakeBridge(self.root, self.lock, steps=20, step_seconds=0.02).run).start()
+        try:
+            (state, _), seen = self.wait(mail, stall=1)
+        finally:
+            done.set()
+        self.assertEqual(state, "answered")
+        self.assertTrue(held)
+        self.assertGreater(len(seen), 10)
+        self.assertEqual([r["seq"] for r in mail.records()], list(range(1, 23)))
 
     def test_a_request_nobody_takes_stalls_and_is_withdrawn(self):
         mail = mailbox.Mail(self.root, "get_all_nets", {}, request_id=f"{os.getpid()}-1-1")

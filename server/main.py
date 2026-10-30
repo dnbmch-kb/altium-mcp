@@ -1396,7 +1396,8 @@ async def _run_altium_script(ctx: Context, script: str, timeout_seconds: int = 1
     - Assign findings to the string variable ResultText - it is returned.
     - DelphiScript has NO inline variable declarations. Reuse the provided
       scratch variables: S1..S3 (String), I1..I3 and B1 (Integer),
-      Obj1..Obj5 (IDispatch), List1 (TStringList), IntMan, DbDoc.
+      Obj1..Obj5 (IDispatch), List1 (an empty TStringList the sandbox frees
+      after the script: never free it), IntMan, DbDoc.
     - try/except does NOT catch runtime errors such as bad conversions or
       invalid API calls, so it cannot be relied on to keep a script alive.
     - The sandbox is standalone: helpers and constants from the production

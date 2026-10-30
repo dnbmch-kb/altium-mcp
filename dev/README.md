@@ -44,8 +44,10 @@ and in [`../server/mailbox.py`](../server/mailbox.py). What keeps it unambiguous
   the answer) and then the bridge's own script project were closed; `closed.txt` beside it says how each open copy
   under `bridge\` went. So the server holds the lock until the run is over.
 - **Progress, not a clock.** The script appends `seq|elapsed ms|step|count|total` to `progress.log` (`BridgeProgress`
-  in `other_utils.pas`, the file rewritten whole and capped at 400 records; a write that meets the server reading
-  is skipped). The server reads the file only when its size or time changed, gives up after `STALL_SECONDS` (120)
+  in `other_utils.pas`: the file created once for the request and held open, each record appended and flushed
+  through that handle, which shares reading, so a reader holding the file, the server or a watcher, fails no write;
+  a file recreated per record raised EFCreateError mid-pass while a watcher held it, ugv-pcb SCB 2026-10-26). The
+  server reads the file only when its size or time changed, gives up after `STALL_SECONDS` (120)
   without a record (`STALL_BY_COMMAND`: 900 for `run_output_jobs`, 300 for a print), and says what it saw: not
   taken (withdrawn, nothing ran) or the last record, Altium hung, a box. `status.json` carries the call in flight
   (state queued / running / answered / stalled, the last record) for a watchdog; MCP progress notifications go to
@@ -211,7 +213,8 @@ python dev/sandbox_runner.py my_experiment.pas [timeout] [--auto-restart]
 Experiment body rules: assign findings to `ResultText`; Pascal has no inline
 declarations, so reuse the scratch variables declared in `Sandbox.pas`
 (`S1..S5`, `I1..I5`, `B1`, `Obj1..Obj7`, `List1`, `List2`, `IntMan`, `DbDoc`)
-or add more there.
+or add more there. `List1` and `List2` start as empty lists that `Run` frees after the experiment; one an
+experiment creates in their place it frees itself.
 
 **These shared scratch variables are a hazard**, not a convenience. Reusing
 one as a loop counter after storing a coordinate in it produced a silently

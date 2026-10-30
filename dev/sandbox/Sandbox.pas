@@ -24,7 +24,8 @@ var
     I1, I2, I3, I4, I5 : Integer;
     B1, B1MAX, I2X : Integer;   // reused as loop counters by some experiments
     Obj1, Obj2, Obj3, Obj4, Obj5, Obj6, Obj7 : IDispatch;
-    List1, List2 : TStringList;
+    List1, List2 : TStringList; // empty lists from Run, which frees them after the experiment; one the
+                                // experiment creates in their place it frees itself
     TargetDoc  : ISch_Document;
     SavedCounts : String;   // stash for results a later loop would clobber
     BodyCross   : Integer;  // own counter - I3 already holds suspect junctions
@@ -69,10 +70,15 @@ procedure Run;
 var
     ResultText : String;
     OutLines   : TStringList;
+    SbList1, SbList2 : TStringList;   // the lists List1 and List2 start as, freed whatever the experiment did
 begin
     LogPath := 'C:\Users\Public\altium_mcp\sandbox_log.txt';
     OutPath := 'C:\Users\Public\altium_mcp\sandbox_result.json';
     LogLines := TStringList.Create;
+    SbList1 := TStringList.Create;
+    SbList2 := TStringList.Create;
+    List1 := SbList1;
+    List2 := SbList2;
     ResultText := '{"sandbox": "no result set"}';
     SandboxLog('sandbox start');
 
@@ -87,6 +93,8 @@ begin
     end;
 
     SandboxLog('sandbox end');
+    SbList1.Free;
+    SbList2.Free;
 
     OutLines := TStringList.Create;
     try
