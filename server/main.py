@@ -614,7 +614,9 @@ async def take_script_lock(owner: str, wait: float = 60):
     deadline = time.monotonic() + wait
     while (holder := script_lock.try_take(owner)) is not None:
         if time.monotonic() >= deadline:
+            script_lock.leave()                     # our wait given up: our line out of the queue
             return holder
+        script_lock.waiting(owner)                  # our line in the queue, once; it goes when our turn's lock is taken
         await asyncio.sleep(0.5)
     return None
 
