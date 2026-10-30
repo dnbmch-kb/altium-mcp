@@ -1056,6 +1056,152 @@ begin
     EdEndModify(Obj);
 end;
 
+// What a wire run from (X1, Y1) to (X2, Y2) would join, '' for nothing: a pin end, a wire vertex, a label, port or
+// junction on it, or a wire under its end (X2, Y2); Skip and Skip2 left out
+function EdRunHits(X1, Y1, X2, Y2: Integer; Skip, Skip2: ISch_GraphicalObject): String;
+var
+    Iter, PinIter       : ISch_Iterator;
+    Obj, Pin            : ISch_GraphicalObject;
+    PX, PY, PD, k       : Integer;
+    SkipAddr, Skip2Addr : Integer;
+begin
+    Result := '';
+    SkipAddr := Skip.I_ObjectAddress;
+    Skip2Addr := Skip2.I_ObjectAddress;
+    Iter := EdDoc.SchIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(eWire, eNetLabel, ePowerObject, ePort, eJunction, eSchComponent));
+    Obj := Iter.FirstSchObject;
+    while (Obj <> nil) and (Result = '') do
+    begin
+        if (Obj.I_ObjectAddress <> SkipAddr) and (Obj.I_ObjectAddress <> Skip2Addr) and EdOwnedBySheet(Obj) then
+        begin
+            if (Obj.ObjectId = eWire) then
+            begin
+                if EdWireTouches(Obj, X2, Y2) then Result := 'a wire';
+                for k := 1 to Obj.VerticesCount do
+                    if EdOnSegment(CoordToMils(Obj.Vertex[k].X), CoordToMils(Obj.Vertex[k].Y), X1, Y1, X2, Y2) then
+                        Result := 'a wire';
+            end
+            else if (Obj.ObjectId = eSchComponent) then
+            begin
+                PinIter := Obj.SchIterator_Create;
+                PinIter.AddFilter_ObjectSet(MkSet(ePin));
+                PinIter.AddFilter_CurrentPartPrimitives;
+                PinIter.AddFilter_CurrentDisplayModePrimitives;
+                Pin := PinIter.FirstSchObject;
+                while (Pin <> nil) and (Result = '') do
+                begin
+                    EdPinEnd(Pin, PX, PY, PD);
+                    if EdOnSegment(PX, PY, X1, Y1, X2, Y2) then Result := 'pin ' + Obj.Designator.Text + '.' + Pin.Designator;
+                    Pin := PinIter.NextSchObject;
+                end;
+                Obj.SchIterator_Destroy(PinIter);
+            end
+            else if EdOnSegment(CoordToMils(Obj.Location.X), CoordToMils(Obj.Location.Y), X1, Y1, X2, Y2) then
+                Result := EdKind(Obj) + ' ' + EdName(Obj);
+        end;
+        Obj := Iter.NextSchObject;
+    end;
+    EdDoc.SchIterator_Destroy(Iter);
+end;
+
+// A net label's new text, and its stub redrawn as long as the text (the house rule: a label's stub as long as its
+// text, on the 50 mil grid). The stub is the one wire under a horizontal label, two vertices, horizontal, one end on a
+// pin or wire (P) and the other free (F). A label whose text runs back toward P moves to F, the stub its text's width;
+// one whose text runs on toward F from inside the stub keeps its spot, the stub reaching past its text's end. Its
+// width is the text's own extent in Altium. A label on anything else, or hanging off its stub's end (a 100 mil
+// connection stub), keeps its wiring; one whose redrawn stub would meet something keeps its old text, the op refused.
+procedure EdRenameLabel(Lbl: ISch_GraphicalObject; Text: String; Line: String);
+var
+    Iter               : ISch_Iterator;
+    W, Stub            : ISch_GraphicalObject;
+    Rect               : IDispatch;
+    OldText, What      : String;
+    AX, AY, X1, X2, Y  : Integer;
+    PX, FX, NF, S, J   : Integer;
+    N, Len, TW, NL     : Integer;
+    L1, L2, Back       : Boolean;
+begin
+    OldText := Lbl.Text;
+    EdSetText(Lbl, Text);
+    if (Lbl.Orientation <> 0) then Exit;
+    AX := CoordToMils(Lbl.Location.X);
+    AY := CoordToMils(Lbl.Location.Y);
+    Stub := nil;
+    N := 0;
+    Iter := EdDoc.SchIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(eWire));
+    W := Iter.FirstSchObject;
+    while (W <> nil) do
+    begin
+        if EdOwnedBySheet(W) then
+            if EdWireTouches(W, AX, AY) then
+            begin
+                N := N + 1;
+                Stub := W;
+            end;
+        W := Iter.NextSchObject;
+    end;
+    EdDoc.SchIterator_Destroy(Iter);
+    if (N <> 1) then Exit;
+    if (Stub.VerticesCount <> 2) then Exit;
+    X1 := CoordToMils(Stub.Vertex[1].X);
+    X2 := CoordToMils(Stub.Vertex[2].X);
+    Y := CoordToMils(Stub.Vertex[1].Y);
+    if (CoordToMils(Stub.Vertex[2].Y) <> Y) or (X1 = X2) then Exit;
+    L1 := EdLiveAt(X1, Y, Stub);
+    L2 := EdLiveAt(X2, Y, Stub);
+    if (L1 = L2) then Exit;
+    if L1 then
+    begin
+        PX := X1;
+        FX := X2;
+    end
+    else
+    begin
+        PX := X2;
+        FX := X1;
+    end;
+    if (FX > PX) then S := 1 else S := -1;
+    Len := Abs(FX - PX);
+
+    J := Lbl.Justification mod 3;                 // 0 left, 1 centre, 2 right: the text runs on from, around or up to its anchor
+    if (J = 1) then Exit;
+    Back := ((J = 0) and (S = -1)) or ((J = 2) and (S = 1));
+    Rect := Lbl.BoundingRectangle;
+    TW := CoordToMils(Rect.Right) - CoordToMils(Rect.Left);
+    if Back then
+        NL := ((TW + 25) div 50) * 50
+    else
+    begin
+        if (AX = FX) then Exit;
+        NL := ((Abs(AX - PX) + TW + 25) div 50) * 50;
+        if (NL < Abs(AX - PX) + 50) then NL := Abs(AX - PX) + 50;
+    end;
+    if (NL < 50) then NL := 50;
+    if (NL = Len) and ((not Back) or (AX = FX)) then Exit;
+    NF := PX + S * NL;
+
+    What := EdRunHits(FX, Y, NF, Y, Stub, Lbl);
+    if (What <> '') then
+    begin
+        EdSetText(Lbl, OldText);
+        EdError(Line, 'its stub redrawn for the new text would meet ' + What + '; the label keeps its old text');
+        Exit;
+    end;
+    if (NL <> Len) then
+    begin
+        EdRemove(Stub);
+        EdWire(PX, Y, NF, Y);
+    end;
+    if Back then
+    begin
+        EdBeginModify(Lbl);
+        Lbl.Location := Point(MilsToCoord(NF), MilsToCoord(Y));
+        EdEndModify(Lbl);
+    end;
+end;
+
 // Remove what names or feeds a pin's hot end: a port, a label, a NoERC marker there, and a two-point wire whose
 // far end carries only a port or label (every port or label on it goes too, mid-stub as at its end, unless another
 // wire runs under it). A wire that also serves something else is refused, not cut: the op then changes nothing.
@@ -1341,7 +1487,7 @@ end;
 
 function EditSchematicFromSpec(SpecPath: String): String;
 var
-    Spec                 : TStringList;
+    Spec, Uids           : TStringList;
     Rec, Kind, Saved     : String;
     Why                  : String;
     i, j, k, n, D, X, Y  : Integer;
@@ -1413,25 +1559,25 @@ begin
         begin
             Obj := EdFindUid(GetFieldFromPipeString(Rec, 1));
             if (Obj = nil) then EdError(Rec, 'no object with that unique id')
+            else if (Obj.ObjectId = eNetLabel) then EdRenameLabel(Obj, GetFieldFromPipeString(Rec, 2), Rec)
             else EdSetText(Obj, GetFieldFromPipeString(Rec, 2));
         end
         else if (Kind = 'RENAME_NET') then
         begin
-            j := 0;
+            // the labels first, then each renamed: a redrawn stub must not change the sheet under the iterator
+            Uids := TStringList.Create;
             Iter := EdDoc.SchIterator_Create;
             Iter.AddFilter_ObjectSet(MkSet(eNetLabel));
             Obj := Iter.FirstSchObject;
             while (Obj <> nil) do
             begin
-                if EdOwnedBySheet(Obj) and (Obj.Text = GetFieldFromPipeString(Rec, 1)) then
-                begin
-                    EdSetText(Obj, GetFieldFromPipeString(Rec, 2));
-                    j := j + 1;
-                end;
+                if EdOwnedBySheet(Obj) and (Obj.Text = GetFieldFromPipeString(Rec, 1)) then Uids.Add(Obj.UniqueId);
                 Obj := Iter.NextSchObject;
             end;
             EdDoc.SchIterator_Destroy(Iter);
-            if (j = 0) then EdError(Rec, 'no net label with that text');
+            for k := 0 to Uids.Count - 1 do EdRenameLabel(EdFindUid(Uids[k]), GetFieldFromPipeString(Rec, 2), Rec);
+            if (Uids.Count = 0) then EdError(Rec, 'no net label with that text');
+            Uids.Free;
         end
         else if (Kind = 'LABEL_TO_PORT') then
         begin

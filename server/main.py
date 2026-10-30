@@ -2952,6 +2952,10 @@ async def edit_schematic(ctx: Context, sheet: str, ops: list, power_nets: list =
                                                          nothing plus the labels and ports on them, mid-stub too,
                                                          unless another wire or a pin is under one
             {"op": "rename_label", "uid", "text"}        {"op": "rename_net", "old", "new"} (every label)
+                                                         a renamed label's stub (one straight wire, one end free)
+                                                         is redrawn as long as the new text, on the 50 mil grid; a
+                                                         label at the free end moves with it. Refused, the old text
+                                                         kept, where the stub would meet anything
             {"op": "port_rename", "uid", "new"}          {"op": "label_to_port", "uid", "text"}
             {"op": "attach_pin", "comp", "pin", "net"}   stub + label or port on a pin
             {"op": "detach_pin", "comp", "pin"}          removes the port, label or stub at a pin and every
