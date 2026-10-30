@@ -17,13 +17,6 @@ worked around by a script in that session. A row fixed on a branch stays until i
   `rename_label` sizes the redrawn stub from Altium's own measure of the text (the house rule: a stub as long as its
   text), so the planner and a rename disagree. Fix: one measure - the planner takes the stroke font's advance
   (`tools/altium` measures 0.98 x height per character, box 1.54 x height) and the rename the same.
-- **`check_placement`'s courtyard measure counts the other part's copper on both sides** (`pcb_utils.pas`
-  `CourtyardCopperGap`, `PlacementKind` 'C' = every signal layer and multilayer; live 2026-10-30 on a copy of
-  castellated-modules PM15-LM5148-12V): R4, a top 0402 at the module centre, clear of every top land but over J1's
-  bottom-layer GND pad, read `overlap`, `courtyard and copper` against J1, while the `all` measure put it 740 mil away;
-  every part placed over a module's bottom pad reads the same. Fix: a courtyard meets only the other part's copper on
-  its own side (that side's outer layer and multilayer pads). Done: on that board R4 at the centre reads no violation
-  and R3 on a land tail still `overlap`, `courtyard and copper`.
 - **`replace` onto mapped pin ends labels them twice and reports the new pins as errors** (live 2026-10-30, a
   TC33X pot replaced by a RESISTOR whose pin ends land on the pot's mapped ends): `EdLabelOldEnd` puts a label on
   each old end although the old stub already carries that net's label, the plan then finds no spot for the new pins

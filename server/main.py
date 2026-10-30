@@ -2456,14 +2456,18 @@ async def check_placement(ctx: Context, cmp_designators: list = None, clearance_
     primitive-to-primitive distance, so reported distances are true minimum
     distances between any primitives (pads, silk, etc.) of the two parts.
 
-    courtyard=True measures the house rule instead: each part is kept out by
-    its courtyard (Mechanical 15 and every mechanical layer named for a
-    courtyard), or by its copper when it has none (a module footprint that is
-    a board's edge). Two courtyards, or a courtyard and the other part's
-    copper, are compared as boxes, so a part inside another's courtyard is an
-    overlap; two parts without courtyards are compared copper to copper. Silk,
+    courtyard=True measures the house rule instead, against the parts on both
+    sides: each part is kept out by its courtyard (Mechanical 15 and every
+    mechanical layer named for a courtyard), or by its copper when it has none
+    (a module footprint that is a board's edge). Two courtyards on one side, or
+    a courtyard and the other part's copper on the courtyard's side (that
+    outer layer and multilayer pads), are compared as boxes, so a part inside
+    another's courtyard is an overlap; copper meets copper on a layer both
+    carry, and courtyards on opposite sides never meet. A top part over a
+    module's bottom pad is clear, a bottom part under it an overlap. Silk,
     assembly and other outlines count for nothing; silk closer than the
-    clearance to the other part's silk is listed apart under silk.
+    clearance to the other part's silk on the same side is listed apart under
+    silk.
 
     Run this after placing components - a screenshot is not verification.
 

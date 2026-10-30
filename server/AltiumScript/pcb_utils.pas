@@ -2287,9 +2287,11 @@ begin
     Result := Sqrt(GX * GX + GY * GY);
 end;
 
-// The least gap in mils between a courtyard box (internal units) and Comp's copper primitives' boxes, 0 when one lies
-// on or in it; -1 when Comp has no copper
-function CourtyardCopperGap(Comp: IPCB_Component; CourtLayers: TStringList; L, B, R, T: Integer): Double;
+// The least gap in mils between a courtyard box (internal units) and the boxes of Comp's copper on the courtyard's side
+// (CourtSide, its part's layer: that outer layer and multilayer pads), 0 when one lies on or in it; -1 when Comp has no
+// copper there - a module's bottom pad is nothing to a top part over it
+function CourtyardCopperGap(Comp: IPCB_Component; CourtLayers: TStringList; CourtSide: Integer;
+                            L, B, R, T: Integer): Double;
 var
     It   : IPCB_GroupIterator;
     Prim : IPCB_Primitive;
@@ -2301,7 +2303,7 @@ begin
     Prim := It.FirstPCBObject;
     while (Prim <> nil) do
     begin
-        if (PlacementKind(Prim, CourtLayers) = 'C') then
+        if (PlacementKind(Prim, CourtLayers) = 'C') and ((Prim.Layer = eMultiLayer) or (Prim.Layer = CourtSide)) then
         begin
             Gap := BoxGapMils(L, B, R, T, Prim.BoundingRectangle.Left, Prim.BoundingRectangle.Bottom,
                               Prim.BoundingRectangle.Right, Prim.BoundingRectangle.Top);
@@ -2312,18 +2314,49 @@ begin
     Comp.GroupIterator_Destroy(It);
 end;
 
+// One part's keep-out against the other part's copper on its side, for parts on opposite sides: its courtyard (HasOwn,
+// the box L, B, R, T in internal units) as a box, or without one its copper by Altium's distance, which meets copper
+// only on a layer both carry. Compared names what was compared; -1 when nothing meets
+function SideGap(Board: IPCB_Board; Own, Other: IPCB_Component; CourtLayers: TStringList; HasOwn: Boolean;
+                 L, B, R, T: Integer; var Compared: String): Double;
+begin
+    if HasOwn then
+    begin
+        Compared := 'courtyard and copper';
+        Result := CourtyardCopperGap(Other, CourtLayers, Own.Layer, L, B, R, T);
+    end
+    else
+    begin
+        Compared := 'copper';
+        Result := KindMinDistance(Board, Own, Other, 'C', 'C', CourtLayers);
+    end;
+end;
+
 // The courtyard measure's gap in mils between two components, each kept out by its courtyard (CourtyardBox) or, with
-// none, by its copper: courtyards and a courtyard against copper as boxes, copper against copper by Altium's distance.
-// Compared names what was compared; -1 when one has neither
+// none, by its copper. On one side courtyards and a courtyard against the other's copper on its side compare as boxes,
+// copper against copper by Altium's distance; on opposite sides courtyards never meet, and the gap is the lesser
+// SideGap of the two parts. Compared names what was compared; -1 when nothing meets
 function KeepOutGap(Board: IPCB_Board; CompA, CompB: IPCB_Component; CourtLayers: TStringList;
                     var Compared: String): Double;
 var
     HasA, HasB                     : Boolean;
     LA, BA, RA, TA, LB, BB, RB, TB : Integer;
+    GapB                           : Double;
+    ComparedB                      : String;
 begin
     HasA := CourtyardBox(CompA, CourtLayers, LA, BA, RA, TA);
     HasB := CourtyardBox(CompB, CourtLayers, LB, BB, RB, TB);
-    if HasA and HasB then
+    if (CompA.Layer <> CompB.Layer) then
+    begin
+        Result := SideGap(Board, CompA, CompB, CourtLayers, HasA, LA, BA, RA, TA, Compared);
+        GapB := SideGap(Board, CompB, CompA, CourtLayers, HasB, LB, BB, RB, TB, ComparedB);
+        if (GapB >= 0) and ((Result < 0) or (GapB < Result)) then
+        begin
+            Result := GapB;
+            Compared := ComparedB;
+        end;
+    end
+    else if HasA and HasB then
     begin
         Compared := 'courtyards';
         Result := BoxGapMils(LA, BA, RA, TA, LB, BB, RB, TB);
@@ -2331,12 +2364,12 @@ begin
     else if HasA then
     begin
         Compared := 'courtyard and copper';
-        Result := CourtyardCopperGap(CompB, CourtLayers, LA, BA, RA, TA);
+        Result := CourtyardCopperGap(CompB, CourtLayers, CompA.Layer, LA, BA, RA, TA);
     end
     else if HasB then
     begin
         Compared := 'courtyard and copper';
-        Result := CourtyardCopperGap(CompA, CourtLayers, LB, BB, RB, TB);
+        Result := CourtyardCopperGap(CompA, CourtLayers, CompB.Layer, LB, BB, RB, TB);
     end
     else
     begin
@@ -2348,11 +2381,12 @@ end;
 // Check component placement for overlaps and clearance violations.
 // Targets are the given designators (or the current selection when the list
 // is empty); each target is checked against every other component on the same
-// side of the board. Bounding boxes act as a fast prefilter; close pairs are
-// measured precisely with Board.PrimPrimDistance (minimum distance between
-// any two primitives of the components, 0 = touching/overlapping).
+// side of the board, with Courtyard on both sides. Bounding boxes act as a fast
+// prefilter; close pairs are measured precisely with Board.PrimPrimDistance
+// (minimum distance between any two primitives of the components, 0 =
+// touching/overlapping).
 // Courtyard: each part is kept out by its courtyard, or by its copper when it has none (KeepOutGap), so a footprint's
-// silk, assembly and other outlines count for nothing; silk to silk is measured apart and listed under silk.
+// silk, assembly and other outlines count for nothing; silk to silk on one side is measured apart and listed under silk.
 function CheckPlacement(DesignatorsList: TStringList; ClearanceMils: Double; Courtyard: Boolean): String;
 var
     Board           : IPCB_Board;
@@ -2440,7 +2474,7 @@ begin
             while (Other <> nil) do
             begin
                 if (Other.Name.Text <> Target.Name.Text) and
-                   (Other.Layer = Target.Layer) and
+                   (Courtyard or (Other.Layer = Target.Layer)) and
                    (Processed.IndexOf(Other.Name.Text) < 0) then
                 begin
                     RectB := Other.BoundingRectangleNoNameComment;
@@ -2462,7 +2496,10 @@ begin
                         begin
                             DistMils := KeepOutGap(Board, Target, Other, CourtIds, Compared);
                             IsOverlap := (DistMils = 0);
-                            SilkMils := KindMinDistance(Board, Target, Other, 'S', 'S', CourtIds);
+                            if (Other.Layer = Target.Layer) then
+                                SilkMils := KindMinDistance(Board, Target, Other, 'S', 'S', CourtIds)
+                            else
+                                SilkMils := -1;
                             if (SilkMils >= 0) and (SilkMils < ClearanceMils) then
                             begin
                                 VProps := TStringList.Create;
