@@ -1246,7 +1246,7 @@ var
     Port           : ISch_Port;
     Rect           : IDispatch;
     PX, FX, Y      : Integer;
-    W, X0, Far     : Integer;
+    W, X0, FarX    : Integer;
     What           : String;
 begin
     Stub := nil;
@@ -1274,17 +1274,17 @@ begin
     if (Side = 'right') then
     begin
         X0 := FX;
-        Far := FX + W;
+        FarX := FX + W;
     end
     else
     begin
         X0 := FX - W;
-        Far := X0;
+        FarX := X0;
     end;
-    What := EdTouchAt(Far, Y, nil, nil, True);
+    What := EdTouchAt(FarX, Y, nil, nil, True);
     if (What <> '') then
     begin
-        EdError(Line, 'its far end at (' + IntToStr(Far) + ', ' + IntToStr(Y) + ') would meet ' + What);
+        EdError(Line, 'its far end at (' + IntToStr(FarX) + ', ' + IntToStr(Y) + ') would meet ' + What);
         Exit;
     end;
     Port := SchServer.SchObjectFactory(ePort, eCreate_GlobalCopy);
