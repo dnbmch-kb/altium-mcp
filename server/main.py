@@ -2427,8 +2427,23 @@ async def check_orientation(ctx: Context, cmp_designators: list = None, min_impr
         "suggestions": suggestions,
     }, indent=2)
 
+
+def placement_check_params(cmp_designators, clearance_mils, courtyard) -> dict:
+    """check_placement's request: the designators (none: Altium's selection), the clearance in mils, above 0, and
+    whether to measure courtyards and copper only. ValueError names what is wrong."""
+    if isinstance(clearance_mils, bool) or not isinstance(clearance_mils, (int, float)) or clearance_mils <= 0:
+        raise ValueError(f"clearance_mils must be a number of mils above 0: {clearance_mils!r}")
+    if not isinstance(courtyard, bool):
+        raise ValueError(f"courtyard must be true or false: {courtyard!r}")
+    params = {"clearance_mils": float(clearance_mils), "courtyard": courtyard}
+    if cmp_designators:
+        params["designators"] = [str(d) for d in cmp_designators]
+    return params
+
+
 @mcp.tool()
-async def check_placement(ctx: Context, cmp_designators: list = None, clearance_mils: float = 6) -> str:
+async def check_placement(ctx: Context, cmp_designators: list = None, clearance_mils: float = 6,
+                          courtyard: bool = False) -> str:
     """
     Verify component placement: find overlaps and clearance violations.
 
@@ -2438,6 +2453,15 @@ async def check_placement(ctx: Context, cmp_designators: list = None, clearance_
     primitive-to-primitive distance, so reported distances are true minimum
     distances between any primitives (pads, silk, etc.) of the two parts.
 
+    courtyard=True measures the house rule instead: each part is kept out by
+    its courtyard (Mechanical 15 and every mechanical layer named for a
+    courtyard), or by its copper when it has none (a module footprint that is
+    a board's edge). Two courtyards, or a courtyard and the other part's
+    copper, are compared as boxes, so a part inside another's courtyard is an
+    overlap; two parts without courtyards are compared copper to copper. Silk,
+    assembly and other outlines count for nothing; silk closer than the
+    clearance to the other part's silk is listed apart under silk.
+
     Run this after placing components - a screenshot is not verification.
 
     Args:
@@ -2445,21 +2469,27 @@ async def check_placement(ctx: Context, cmp_designators: list = None, clearance_
             Omit to check the components currently selected in Altium.
         clearance_mils (float): Minimum allowed primitive-to-primitive distance
             in mils (default 6). Pairs closer than this are reported.
+        courtyard (bool): measure courtyards and copper only (default false).
 
     Returns:
-        str: JSON object with checked_count, violation_count, and a violations
-             list. Each violation has a/b designators, type
-             ("bounding_box_overlap" = the parts' outlines intersect, or
-             "clearance" = distance below threshold), distance_mils (0 =
-             touching/overlapping copper or silk), overlap sizes when boxes
-             intersect, and the other part's x/y position. An empty violations
-             list means the placement is clean at the given clearance.
+        str: JSON object with checked_count, measure ("all" or "courtyard"),
+             violation_count, and a violations list. Each violation has a/b
+             designators, type ("bounding_box_overlap" = the parts' outlines
+             intersect, or "clearance" = distance below threshold; with
+             courtyard "overlap" = distance 0 and between, what was compared:
+             "courtyards", "courtyard and copper" or "copper"), distance_mils
+             (0 = touching/overlapping), overlap sizes when boxes intersect,
+             and the other part's x/y position. With courtyard also
+             courtyard_layers (their names), silk_count and silk [{a, b,
+             distance_mils}]. An empty violations list means the placement is
+             clean at the given clearance.
     """
-    logger.info(f"Checking placement (designators={cmp_designators}, clearance={clearance_mils})")
-
-    params = {"clearance_mils": clearance_mils}
-    if cmp_designators:
-        params["designators"] = cmp_designators
+    logger.info(f"Checking placement (designators={cmp_designators}, clearance={clearance_mils}, "
+                f"courtyard={courtyard})")
+    try:
+        params = placement_check_params(cmp_designators, clearance_mils, courtyard)
+    except ValueError as e:
+        return json.dumps({"success": False, "error": str(e)})
 
     response = await altium_bridge.execute_command("check_placement", params)
 

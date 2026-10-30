@@ -2168,13 +2168,192 @@ begin
     Result := CoordToMils(MinD);
 end;
 
+// check_placement's courtyard layers as V6 layer ids, with their names: Mechanical 15 (the house libraries' and
+// create_pcb_footprint's courtyard) and every mechanical layer named for a courtyard (a layer of a Courtyard kind is
+// named so: PWRBASE's Top Courtyard on Mechanical 2, Bottom Courtyard on Mechanical 16)
+procedure CourtyardLayers(Board: IPCB_Board; Ids: TStringList; Names: TStringList);
+var
+    LS        : IPCB_LayerStack_V7;
+    MechLayer : IPCB_MechanicalLayer;
+    i         : Integer;
+begin
+    LS := Board.LayerStack_V7;
+    for i := 1 to 32 do
+    begin
+        MechLayer := LS.LayerObject_V7[ILayer.MechanicalLayer(i)];
+        if (i = 15) or (Pos('COURTYARD', UpperCase(MechLayer.Name)) > 0) then
+        begin
+            Ids.Add(IntToStr(MechLayer.V6_LayerID));
+            Names.Add('"' + JSONEscapeString(MechLayer.Name) + '"');
+        end;
+    end;
+end;
+
+// What a component primitive is to the courtyard measure: 'Y' courtyard (on CourtLayers), 'S' silk, 'C' copper (a
+// signal layer or multilayer), '' anything else; a text is '' (designator and comment strings float over neighbours)
+function PlacementKind(Prim: IPCB_Primitive; CourtLayers: TStringList): String;
+begin
+    Result := '';
+    if (Prim.ObjectId = eTextObject) then Exit;
+    if (CourtLayers.IndexOf(IntToStr(Prim.Layer)) >= 0) then
+        Result := 'Y'
+    else if (Prim.Layer = eTopOverlay) or (Prim.Layer = eBottomOverlay) then
+        Result := 'S'
+    else if (Prim.Layer = eMultiLayer) or ((Prim.Layer >= eTopLayer) and (Prim.Layer <= eBottomLayer)) then
+        Result := 'C';
+end;
+
+// The least primitive-to-primitive distance in mils between CompA's primitives of kind KindA and CompB's of kind KindB
+// (PlacementKind); -1 when either has none
+function KindMinDistance(Board: IPCB_Board; CompA, CompB: IPCB_Component; KindA, KindB: String;
+                         CourtLayers: TStringList): Double;
+var
+    ItA, ItB : IPCB_GroupIterator;
+    PA, PB   : IPCB_Primitive;
+    D, MinD  : Integer;
+begin
+    MinD := -1;
+    ItA := CompA.GroupIterator_Create;
+    ItA.SetState_FilterAll;
+    PA := ItA.FirstPCBObject;
+    while (PA <> nil) and (MinD <> 0) do
+    begin
+        if (PlacementKind(PA, CourtLayers) = KindA) then
+        begin
+            ItB := CompB.GroupIterator_Create;
+            ItB.SetState_FilterAll;
+            PB := ItB.FirstPCBObject;
+            while (PB <> nil) and (MinD <> 0) do
+            begin
+                if (PlacementKind(PB, CourtLayers) = KindB) then
+                begin
+                    D := Board.PrimPrimDistance(PA, PB);
+                    if (MinD < 0) or (D < MinD) then MinD := D;
+                end;
+                PB := ItB.NextPCBObject;
+            end;
+            CompB.GroupIterator_Destroy(ItB);
+        end;
+        PA := ItA.NextPCBObject;
+    end;
+    CompA.GroupIterator_Destroy(ItA);
+    if (MinD < 0) then Result := -1 else Result := CoordToMils(MinD);
+end;
+
+// A component's courtyard as one box in internal units, the union of its primitives' boxes on the courtyard layers
+// (line widths included); False when it has none
+function CourtyardBox(Comp: IPCB_Component; CourtLayers: TStringList; var L: Integer; var B: Integer;
+                      var R: Integer; var T: Integer): Boolean;
+var
+    It   : IPCB_GroupIterator;
+    Prim : IPCB_Primitive;
+begin
+    Result := False;
+    It := Comp.GroupIterator_Create;
+    It.SetState_FilterAll;
+    Prim := It.FirstPCBObject;
+    while (Prim <> nil) do
+    begin
+        if (PlacementKind(Prim, CourtLayers) = 'Y') then
+        begin
+            if not Result then
+            begin
+                L := Prim.BoundingRectangle.Left;
+                B := Prim.BoundingRectangle.Bottom;
+                R := Prim.BoundingRectangle.Right;
+                T := Prim.BoundingRectangle.Top;
+                Result := True;
+            end
+            else
+            begin
+                L := Min(L, Prim.BoundingRectangle.Left);
+                B := Min(B, Prim.BoundingRectangle.Bottom);
+                R := Max(R, Prim.BoundingRectangle.Right);
+                T := Max(T, Prim.BoundingRectangle.Top);
+            end;
+        end;
+        Prim := It.NextPCBObject;
+    end;
+    Comp.GroupIterator_Destroy(It);
+end;
+
+// The gap in mils between two boxes given in internal units (10000 a mil), 0 when they touch or overlap
+function BoxGapMils(L1, B1, R1, T1, L2, B2, R2, T2: Integer): Double;
+var
+    GX, GY : Double;
+begin
+    GX := Max(Max(L2 - R1, L1 - R2), 0) / 10000;
+    GY := Max(Max(B2 - T1, B1 - T2), 0) / 10000;
+    Result := Sqrt(GX * GX + GY * GY);
+end;
+
+// The least gap in mils between a courtyard box (internal units) and Comp's copper primitives' boxes, 0 when one lies
+// on or in it; -1 when Comp has no copper
+function CourtyardCopperGap(Comp: IPCB_Component; CourtLayers: TStringList; L, B, R, T: Integer): Double;
+var
+    It   : IPCB_GroupIterator;
+    Prim : IPCB_Primitive;
+    Gap  : Double;
+begin
+    Result := -1;
+    It := Comp.GroupIterator_Create;
+    It.SetState_FilterAll;
+    Prim := It.FirstPCBObject;
+    while (Prim <> nil) do
+    begin
+        if (PlacementKind(Prim, CourtLayers) = 'C') then
+        begin
+            Gap := BoxGapMils(L, B, R, T, Prim.BoundingRectangle.Left, Prim.BoundingRectangle.Bottom,
+                              Prim.BoundingRectangle.Right, Prim.BoundingRectangle.Top);
+            if (Result < 0) or (Gap < Result) then Result := Gap;
+        end;
+        Prim := It.NextPCBObject;
+    end;
+    Comp.GroupIterator_Destroy(It);
+end;
+
+// The courtyard measure's gap in mils between two components, each kept out by its courtyard (CourtyardBox) or, with
+// none, by its copper: courtyards and a courtyard against copper as boxes, copper against copper by Altium's distance.
+// Between names what was compared; -1 when one has neither
+function KeepOutGap(Board: IPCB_Board; CompA, CompB: IPCB_Component; CourtLayers: TStringList;
+                    var Between: String): Double;
+var
+    HasA, HasB                     : Boolean;
+    LA, BA, RA, TA, LB, BB, RB, TB : Integer;
+begin
+    HasA := CourtyardBox(CompA, CourtLayers, LA, BA, RA, TA);
+    HasB := CourtyardBox(CompB, CourtLayers, LB, BB, RB, TB);
+    if HasA and HasB then
+    begin
+        Between := 'courtyards';
+        Result := BoxGapMils(LA, BA, RA, TA, LB, BB, RB, TB);
+    end
+    else if HasA then
+    begin
+        Between := 'courtyard and copper';
+        Result := CourtyardCopperGap(CompB, CourtLayers, LA, BA, RA, TA);
+    end
+    else if HasB then
+    begin
+        Between := 'courtyard and copper';
+        Result := CourtyardCopperGap(CompA, CourtLayers, LB, BB, RB, TB);
+    end
+    else
+    begin
+        Between := 'copper';
+        Result := KindMinDistance(Board, CompA, CompB, 'C', 'C', CourtLayers);
+    end;
+end;
+
 // Check component placement for overlaps and clearance violations.
 // Targets are the given designators (or the current selection when the list
 // is empty); each target is checked against every other component on the same
 // side of the board. Bounding boxes act as a fast prefilter; close pairs are
 // measured precisely with Board.PrimPrimDistance (minimum distance between
 // any two primitives of the components, 0 = touching/overlapping).
-function CheckPlacement(DesignatorsList: TStringList; ClearanceMils: Double): String;
+// Courtyard: each part is kept out by its courtyard, or by its copper when it has none (KeepOutGap), so a footprint's
+// silk, assembly and other outlines count for nothing; silk to silk is measured apart and listed under silk.
+function CheckPlacement(DesignatorsList: TStringList; ClearanceMils: Double; Courtyard: Boolean): String;
 var
     Board           : IPCB_Board;
     Iterator        : IPCB_BoardIterator;
@@ -2183,14 +2362,19 @@ var
     Processed       : TStringList;
     MissingArray    : TStringList;
     ViolationsArray : TStringList;
+    SilkArray       : TStringList;
+    CourtIds        : TStringList;
+    CourtNames      : TStringList;
     VProps          : TStringList;
     ResultProps     : TStringList;
     RectA, RectB    : TCoordRect;
     Designator      : String;
+    Between         : String;
     i               : Integer;
     OverlapX, OverlapY : Double;
     Separation      : Double;
     DistMils        : Double;
+    SilkMils        : Double;
     PairsChecked    : Integer;
     IsOverlap       : Boolean;
 begin
@@ -2208,8 +2392,12 @@ begin
     Processed := TStringList.Create;
     MissingArray := TStringList.Create;
     ViolationsArray := TStringList.Create;
+    SilkArray := TStringList.Create;
+    CourtIds := TStringList.Create;
+    CourtNames := TStringList.Create;
     ResultProps := TStringList.Create;
     PairsChecked := 0;
+    if Courtyard then CourtyardLayers(Board, CourtIds, CourtNames);
 
     try
         // Build the target list: explicit designators, or current selection
@@ -2270,22 +2458,51 @@ begin
                     if (Separation < ClearanceMils + 25) then
                     begin
                         PairsChecked := PairsChecked + 1;
-                        DistMils := ComponentMinDistance(Board, Target, Other);
-                        IsOverlap := (OverlapX > 0) and (OverlapY > 0);
+                        if Courtyard then
+                        begin
+                            DistMils := KeepOutGap(Board, Target, Other, CourtIds, Between);
+                            IsOverlap := (DistMils = 0);
+                            SilkMils := KindMinDistance(Board, Target, Other, 'S', 'S', CourtIds);
+                            if (SilkMils >= 0) and (SilkMils < ClearanceMils) then
+                            begin
+                                VProps := TStringList.Create;
+                                try
+                                    AddJSONProperty(VProps, 'a', Target.Name.Text);
+                                    AddJSONProperty(VProps, 'b', Other.Name.Text);
+                                    AddJSONNumber(VProps, 'distance_mils', Round(SilkMils * 100) / 100);
+                                    SilkArray.Add(BuildJSONObject(VProps, 2));
+                                finally
+                                    VProps.Free;
+                                end;
+                            end;
+                        end
+                        else
+                        begin
+                            DistMils := ComponentMinDistance(Board, Target, Other);
+                            IsOverlap := (OverlapX > 0) and (OverlapY > 0);
+                        end;
 
-                        if (IsOverlap) or (DistMils < ClearanceMils) then
+                        if (IsOverlap) or ((DistMils >= 0) and (DistMils < ClearanceMils)) then
                         begin
                             VProps := TStringList.Create;
                             try
                                 AddJSONProperty(VProps, 'a', Target.Name.Text);
                                 AddJSONProperty(VProps, 'b', Other.Name.Text);
                                 AddJSONProperty(VProps, 'layer', Layer2String(Target.Layer));
-                                if IsOverlap then
+                                if Courtyard then
+                                begin
+                                    if IsOverlap then
+                                        AddJSONProperty(VProps, 'type', 'overlap')
+                                    else
+                                        AddJSONProperty(VProps, 'type', 'clearance');
+                                    AddJSONProperty(VProps, 'between', Between);
+                                end
+                                else if IsOverlap then
                                     AddJSONProperty(VProps, 'type', 'bounding_box_overlap')
                                 else
                                     AddJSONProperty(VProps, 'type', 'clearance');
                                 AddJSONNumber(VProps, 'distance_mils', Round(DistMils * 100) / 100);
-                                if IsOverlap then
+                                if IsOverlap and not Courtyard then
                                 begin
                                     AddJSONNumber(VProps, 'overlap_x_mils', Round(OverlapX * 100) / 100);
                                     AddJSONNumber(VProps, 'overlap_y_mils', Round(OverlapY * 100) / 100);
@@ -2309,6 +2526,18 @@ begin
 
         AddJSONInteger(ResultProps, 'checked_count', Targets.Count);
         AddJSONNumber(ResultProps, 'clearance_mils', ClearanceMils);
+        if Courtyard then
+        begin
+            AddJSONProperty(ResultProps, 'measure', 'courtyard');
+            ResultProps.Add(BuildJSONArray(CourtNames, 'courtyard_layers'));
+            AddJSONInteger(ResultProps, 'silk_count', SilkArray.Count);
+            if (SilkArray.Count > 0) then
+                ResultProps.Add(BuildJSONArray(SilkArray, 'silk', 1))
+            else
+                ResultProps.Add('"silk": []');
+        end
+        else
+            AddJSONProperty(ResultProps, 'measure', 'all');
         AddJSONInteger(ResultProps, 'close_pairs_measured', PairsChecked);
         AddJSONInteger(ResultProps, 'violation_count', ViolationsArray.Count);
 
@@ -2328,6 +2557,9 @@ begin
         Processed.Free;
         MissingArray.Free;
         ViolationsArray.Free;
+        SilkArray.Free;
+        CourtIds.Free;
+        CourtNames.Free;
         ResultProps.Free;
     end;
 end;

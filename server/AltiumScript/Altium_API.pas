@@ -683,9 +683,11 @@ var
     i, ValueStart: Integer;
     DesignatorsList: TStringList;
     ClearanceMils: Double;
+    Courtyard: Boolean;
 begin
     DesignatorsList := TStringList.Create;
     ClearanceMils := 6;
+    Courtyard := False;
 
     try
         // Parse parameters from the request
@@ -717,10 +719,12 @@ begin
                 ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
                 ParamValue := TrimJSON(ParamValue);
                 ClearanceMils := SafeStrToFloat(ParamValue);
-            end;
+            end
+            else if (Pos('"courtyard"', RequestData[i]) > 0) then
+                Courtyard := LowerCase(JSONLineValue(RequestData[i])) = 'true';
         end;
 
-        Result := CheckPlacement(DesignatorsList, ClearanceMils);
+        Result := CheckPlacement(DesignatorsList, ClearanceMils, Courtyard);
     finally
         DesignatorsList.Free;
     end;
