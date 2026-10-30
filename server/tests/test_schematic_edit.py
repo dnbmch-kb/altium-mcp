@@ -356,6 +356,15 @@ class TwoPassTest(unittest.TestCase):
         self.assertEqual(self.specs[0][-3:], [f"PLACE|R7|{self.lib}|RESISTOR|1000|1000|0|0|Res-Gen.DbLib|||"
                                               f"RES_0603_1608|||{pcblib}", "END", "SAVE"])
 
+    def test_what_the_bridge_removed_comes_back(self):
+        removed = [{"uid": "WIREAAAA", "kind": "wire", "text": ""}, {"uid": "LBLBBBBB", "kind": "label", "text": "SDA"}]
+        self.answers = [{"success": True, "sheet": str(self.sheet), "saved": str(self.sheet), "ops": 1, "errors": [],
+                         "placed": [], "removed": removed, "pending": [], "geometry": None}]
+        r = self.run_tool([{"op": "detach_pin", "comp": "des:R1", "pin": "1"}])
+        self.assertTrue(r["success"], r)
+        self.assertEqual(r["removed"], removed)
+        self.assertEqual(self.specs[0][-2:], ["DETACH|des:R1|1", "SAVE"])   # nothing to connect: one pass
+
     def test_unbound_models_ignore_unlinked_parts(self):
         part = dict(self.placed(bound=False), library="parts.SchLib")
         self.assertEqual(se.unbound_models([part]), [])

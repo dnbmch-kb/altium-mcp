@@ -20,6 +20,7 @@ var
     EdPlaced    : TStringList;
     EdPower     : TStringList;    // "NET=style,orient,shown"
     EdPending   : TStringList;    // [part key, "pin", "net", x, y, direction]
+    EdRemoved   : TStringList;    // {uid, kind, text} of every object the call took off the sheet
     EdGeom      : String;
     EdOps       : Integer;
 
@@ -51,8 +52,32 @@ begin
     SchServer.RobotManager.SendMessage(EdDoc.I_ObjectAddress, c_BroadCast, SCHM_PrimitiveRegistration, Obj.I_ObjectAddress);
 end;
 
+// What a sheet object is, for the answer: component, wire, label, power_port, port, no_erc, junction
+function EdKind(Obj: ISch_GraphicalObject): String;
+begin
+    if (Obj.ObjectId = eSchComponent) then Result := 'component'
+    else if (Obj.ObjectId = eWire) then Result := 'wire'
+    else if (Obj.ObjectId = eNetLabel) then Result := 'label'
+    else if (Obj.ObjectId = ePowerObject) then Result := 'power_port'
+    else if (Obj.ObjectId = ePort) then Result := 'port'
+    else if (Obj.ObjectId = eNoERC) then Result := 'no_erc'
+    else if (Obj.ObjectId = eJunction) then Result := 'junction'
+    else Result := 'object ' + IntToStr(Obj.ObjectId);
+end;
+
+// Its name: a component's designator, a label's or power port's text, a port's name; '' for the rest
+function EdName(Obj: ISch_GraphicalObject): String;
+begin
+    Result := '';
+    if (Obj.ObjectId = eSchComponent) then Result := Obj.Designator.Text
+    else if (Obj.ObjectId = eNetLabel) or (Obj.ObjectId = ePowerObject) then Result := Obj.Text
+    else if (Obj.ObjectId = ePort) then Result := Obj.Name;
+end;
+
 procedure EdRemove(Obj: ISch_GraphicalObject);
 begin
+    EdRemoved.Add('{"uid": "' + JSONEscapeString(Obj.UniqueId) + '", "kind": "' + EdKind(Obj) + '", "text": "' +
+                  JSONEscapeString(EdName(Obj)) + '"}');
     EdDoc.RemoveSchObject(Obj);
     SchServer.RobotManager.SendMessage(EdDoc.I_ObjectAddress, c_BroadCast, SCHM_PrimitiveRegistration, Obj.I_ObjectAddress);
 end;
@@ -857,7 +882,28 @@ begin
     EdDoc.SchIterator_Destroy(Iter);
 end;
 
-// Delete Comp and, with DeadEnds, every wire left connecting nothing, then the labels and ports on them
+// The unique ids of the labels and power ports lying on W, at a vertex or mid-segment (a label on a right pin's
+// stub sits 100 mil out, not at its end), added to Names once each
+procedure EdNamesOnWire(W: ISch_Wire; Names: TStringList);
+var
+    Iter : ISch_Iterator;
+    Obj  : ISch_GraphicalObject;
+begin
+    Iter := EdDoc.SchIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(eNetLabel, ePowerObject));
+    Obj := Iter.FirstSchObject;
+    while (Obj <> nil) do
+    begin
+        if EdOwnedBySheet(Obj) then
+            if EdWireTouches(W, CoordToMils(Obj.Location.X), CoordToMils(Obj.Location.Y)) then
+                if (Names.IndexOf(Obj.UniqueId) < 0) then Names.Add(Obj.UniqueId);
+        Obj := Iter.NextSchObject;
+    end;
+    EdDoc.SchIterator_Destroy(Iter);
+end;
+
+// Delete Comp and, with DeadEnds, every wire left connecting nothing, then the labels and ports those wires carried
+// or that sat on a doomed point, unless a wire or pin is still under them
 procedure EdDeleteComponent(Comp: ISch_Component; DeadEnds: Boolean; Keep: String);
 var
     Points             : TStringList;
@@ -865,7 +911,7 @@ var
     Pin, Obj           : ISch_GraphicalObject;
     X, Y, D, k, n      : Integer;
     Changed, Touch     : Boolean;
-    Doomed             : TStringList;
+    Doomed, Carried    : TStringList;
     W                  : ISch_Wire;
 begin
     Points := TStringList.Create;
@@ -884,6 +930,7 @@ begin
     EdRemove(Comp);
     if not DeadEnds then begin Points.Free; Exit; end;
 
+    Carried := TStringList.Create;
     Changed := True;
     while Changed do
     begin
@@ -919,12 +966,13 @@ begin
             W := EdFindUid(Doomed[k]);
             for n := 1 to W.VerticesCount do
                 Points.Add(IntToStr(CoordToMils(W.Vertex[n].X)) + ',' + IntToStr(CoordToMils(W.Vertex[n].Y)));
+            EdNamesOnWire(W, Carried);
             EdRemove(W);
             Changed := True;
         end;
         Doomed.Free;
     end;
-    // labels and ports left on a doomed point with no wire or pin under them
+    // labels and ports a doomed wire carried or left on a doomed point, with no wire or pin under them now
     Doomed := TStringList.Create;
     Iter := EdDoc.SchIterator_Create;
     Iter.AddFilter_ObjectSet(MkSet(eNetLabel, ePowerObject));
@@ -932,13 +980,15 @@ begin
     while (Obj <> nil) do
     begin
         if EdOwnedBySheet(Obj) and (Pos(Obj.UniqueId, Keep) = 0) then
-            if (Points.IndexOf(IntToStr(CoordToMils(Obj.Location.X)) + ',' + IntToStr(CoordToMils(Obj.Location.Y))) >= 0) then
+            if (Carried.IndexOf(Obj.UniqueId) >= 0) or
+               (Points.IndexOf(IntToStr(CoordToMils(Obj.Location.X)) + ',' + IntToStr(CoordToMils(Obj.Location.Y))) >= 0) then
                 if not EdLiveAt(CoordToMils(Obj.Location.X), CoordToMils(Obj.Location.Y), Obj) then Doomed.Add(Obj.UniqueId);
         Obj := Iter.NextSchObject;
     end;
     EdDoc.SchIterator_Destroy(Iter);
     for k := 0 to Doomed.Count - 1 do EdRemoveUid(Doomed[k]);
     Doomed.Free;
+    Carried.Free;
     Points.Free;
 end;
 
@@ -950,8 +1000,8 @@ begin
 end;
 
 // Remove what names or feeds a pin's hot end: a port, a label, a NoERC marker there, and a two-point wire whose
-// far end carries only a port or label (that port or label goes too). A wire that also serves something else is
-// refused, not cut: the op then changes nothing.
+// far end carries only a port or label (every port or label on it goes too, mid-stub as at its end, unless another
+// wire runs under it). A wire that also serves something else is refused, not cut: the op then changes nothing.
 procedure EdDetach(Comp: ISch_Component; PinDes: String; Line: String);
 var
     Pin                : ISch_Pin;
@@ -1003,8 +1053,11 @@ begin
                             Name := NIter.FirstSchObject;
                             while (Name <> nil) do
                             begin
-                                if EdOwnedBySheet(Name) and (CoordToMils(Name.Location.X) = FX) and
-                                   (CoordToMils(Name.Location.Y) = FY) then Doomed.Add(Name.UniqueId);
+                                // on the stub and on nothing else live: the pin end's own are taken below
+                                if EdOwnedBySheet(Name) then
+                                    if EdWireTouches(Obj, CoordToMils(Name.Location.X), CoordToMils(Name.Location.Y)) then
+                                        if not EdLiveAt(CoordToMils(Name.Location.X), CoordToMils(Name.Location.Y), Obj) then
+                                            if (Doomed.IndexOf(Name.UniqueId) < 0) then Doomed.Add(Name.UniqueId);
                                 Name := NIter.NextSchObject;
                             end;
                             EdDoc.SchIterator_Destroy(NIter);
@@ -1013,7 +1066,7 @@ begin
                 end;
             end
             else if (CoordToMils(Obj.Location.X) = X) and (CoordToMils(Obj.Location.Y) = Y) then
-                Doomed.Add(Obj.UniqueId);
+                if (Doomed.IndexOf(Obj.UniqueId) < 0) then Doomed.Add(Obj.UniqueId);
         end;
         Obj := Iter.NextSchObject;
     end;
@@ -1113,6 +1166,7 @@ begin
     EdPlaced := TStringList.Create;
     EdPower := TStringList.Create;
     EdPending := TStringList.Create;
+    EdRemoved := TStringList.Create;
     EdGeom := 'null';
     EdOps := 0;
     Saved := '';
@@ -1319,13 +1373,14 @@ begin
 
     Result := '{"success": ' + EdBool(EdErrors.Count = 0) + ', "sheet": "' + JSONEscapeString(EdSheetPath) +
               '", "saved": "' + JSONEscapeString(Saved) + '", "ops": ' + IntToStr(EdOps) +
-              ', "errors": [' + EdJoin(EdErrors) + '], "placed": [' + EdJoin(EdPlaced) + '], "pending": [' +
-              EdJoin(EdPending) + '], "geometry": ' + EdGeom + '}';
+              ', "errors": [' + EdJoin(EdErrors) + '], "placed": [' + EdJoin(EdPlaced) + '], "removed": [' +
+              EdJoin(EdRemoved) + '], "pending": [' + EdJoin(EdPending) + '], "geometry": ' + EdGeom + '}';
     Spec.Free;
     EdErrors.Free;
     EdPlaced.Free;
     EdPower.Free;
     EdPending.Free;
+    EdRemoved.Free;
 end;
 
 // annotate_schematic: SHEET lines, ASSIGN|uid|designator lines resolved over all those sheets, SAVE

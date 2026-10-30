@@ -2947,12 +2947,14 @@ async def edit_schematic(ctx: Context, sheet: str, ops: list, power_nets: list =
             {"op": "delete", "uid"}                      any sheet object by unique id
             {"op": "delete_component", "uid", "dead_ends": true, "keep": [uid...]}
                                                          a part, and with dead_ends the wires left connecting
-                                                         nothing plus the labels and ports on them
+                                                         nothing plus the labels and ports on them, mid-stub too,
+                                                         unless another wire or a pin is under one
             {"op": "rename_label", "uid", "text"}        {"op": "rename_net", "old", "new"} (every label)
             {"op": "port_rename", "uid", "new"}          {"op": "label_to_port", "uid", "text"}
             {"op": "attach_pin", "comp", "pin", "net"}   stub + label or port on a pin
-            {"op": "detach_pin", "comp", "pin"}          removes the port, label or stub at a pin; a wire that
-                                                         also serves something else is refused
+            {"op": "detach_pin", "comp", "pin"}          removes the port, label or stub at a pin and every
+                                                         label or port on that stub; a wire that also serves
+                                                         something else is refused
             {"op": "no_erc_pins", "comp", "pins": [..]}
             {"op": "attach_entry", "symbol", "entry", "net"}   a sheet symbol's entry
             {"op": "place", "designator", "symbol_library", "lib_ref", "x", "y", "orient", "mirror",
@@ -3000,8 +3002,10 @@ async def edit_schematic(ctx: Context, sheet: str, ops: list, power_nets: list =
     Returns:
         str: JSON with success, sheet, saved, ops, errors [..], placed [{designator, uid, x, y,
              pins [[pin, x, y]], unassigned_pins, library, design_item, models [{type, name, current,
-             use_component_library, library_path}]}], connections [{designator, pins, net, kind,
-             boxes [[l, b, r, t]]}], overlaps [..]. A part linked to an IntLib or DbLib takes every model from that
+             use_component_library, library_path}]}], removed [{uid, kind, text}] (every object the call took
+             off the sheet: component, wire, label, power_port, port, no_erc, junction), connections
+             [{designator, pins, net, kind, boxes [[l, b, r, t]]}], overlaps [..]. A part linked to an IntLib or
+             DbLib takes every model from that
              library ("Use Component Library", as a hand-placed part does) but the footprint given a
              footprint_library; a model on library Any (neither) is an error.
     """
