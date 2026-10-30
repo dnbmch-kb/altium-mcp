@@ -89,10 +89,11 @@ def stage_bridge(project: Path, root: Path = BRIDGE_STAGE_DIR) -> Path:
     Altium runs the in-memory text of a script project it already has open, not
     the file on disk, so a bridge run in place keeps running the text it first
     loaded after a unit is edited. The folder name is the hash of the project
-    file and every unit it lists: unchanged sources reuse the copy Altium has
-    open, an edit gets a new one. It sits in the exchange directory, which
-    Altium sees under the same path even when Claude Desktop's MSIX package
-    redirects this process's AppData writes."""
+    file and every unit it lists: unchanged sources reuse the same copy, an edit
+    gets a new one. Run closes every copy at the end of each run
+    (Altium_API.pas), so Altium opens it from disk for the next. It sits in the
+    exchange directory, which Altium sees under the same path even when Claude
+    Desktop's MSIX package redirects this process's AppData writes."""
     project = Path(project)
     text = project.read_bytes().removeprefix(codecs.BOM_UTF8).decode("latin-1")
     cfg = configparser.ConfigParser(interpolation=None)
@@ -834,7 +835,9 @@ async def search_library_symbol(ctx: Context, symbol_name: str, library_path: st
     Args:
         symbol_name (str): Name or partial name of the symbol to search for
         library_path (str): Full file path to the .SchLib file (e.g. "C:\\Libraries\\MyParts.SchLib").
-                           The tool will open this file in Altium if it is not already open.
+                           The tool will open this file in Altium if it is not already open,
+                           and close it again at the end of the call; a library open before
+                           stays open, on the symbol it navigated to.
                            If empty, uses the currently open library.
                            If no library is open and no path is provided, ask the user for the file path.
 
@@ -1385,7 +1388,9 @@ async def _run_altium_script(ctx: Context, script: str, timeout_seconds: int = 1
     that state and reports exactly which statement died.
 
     The script runs in a SEPARATE script project, so a crash here can never
-    break the other MCP tools.
+    break the other MCP tools. The project is closed at the end of every run
+    that finishes (the last steps say so), so the next run reads its unit
+    fresh from disk and the operator's workspace keeps no sandbox.
 
     Writing the script:
     - Call SandboxLog('...') before each risky statement. The log is flushed
@@ -1600,7 +1605,8 @@ async def get_footprint_primitives(ctx: Context, library_path: str = "", footpri
     Args:
         library_path (str, optional): Full path to the .PcbLib. Omit to use
             the currently focused PCB library (an already-open library is
-            only focused, never reloaded).
+            only focused, never reloaded, and stays open; one the call opens is
+            closed again at its end).
         footprint_name (str, optional): Exact footprint name, or "*".
 
     Returns:
@@ -1770,7 +1776,8 @@ async def build_schematic(ctx: Context, parts: list, wires: list = None,
             existing folder. The sheet is saved there and closed; without it
             the sheet stays open and unsaved. Either way it is kept out of
             the focused project: a project that lists the path takes it in
-            when opened.
+            when opened. Every .SchLib the call opens is closed again at its
+            end; one open before stays open.
 
     Returns:
         JSON with the created sheet name (its path once saved), counts, and
@@ -1868,8 +1875,10 @@ async def get_symbol_primitives(ctx: Context, library_path: str = "", symbol_nam
       validating a symbol.
 
     Args:
-        library_path (str, optional): Full path to the .SchLib file to open.
-            Omit to use the schematic library currently focused in Altium.
+        library_path (str, optional): Full path to the .SchLib file. A library
+            the call opens is closed again at its end; one open before stays
+            open and is only focused. Omit to use the schematic library
+            currently focused in Altium.
         symbol_name (str, optional): Exact symbol (LibReference) name to dump.
 
     Returns:
@@ -2929,7 +2938,8 @@ async def edit_schematic(ctx: Context, sheet: str, ops: list, power_nets: list =
     power net, else a label; never a spot that touches another net's pin, wire, label or port. "connections" returns each one's boxes and
     "overlaps" what still touches. Read the result's "errors": an op that cannot be carried out changes nothing
     and is listed there; the rest still runs. Verify with a connectivity readback of the saved sheet
-    (c:/Projects/tools/altium/sch_nets.py), not with the result alone.
+    (c:/Projects/tools/altium/sch_nets.py), not with the result alone. Every .SchLib the call opens to copy a
+    symbol from is closed again at its end, saving nothing, a failed op's too; one open before the call stays open.
 
     Components are referenced as "uid:<UNIQUEID>" (read from the file) or "des:<designator>".
 
@@ -3016,7 +3026,8 @@ async def replace_component(ctx: Context, sheet: str, comp: str, symbol_library:
     Args:
         sheet: full path of the .SchDoc.
         comp: "uid:<UNIQUEID>" or "des:<designator>" of the part to replace; its designator is kept.
-        symbol_library: full path of the .SchLib holding the new symbol.
+        symbol_library: full path of the .SchLib holding the new symbol; closed again at the end of the call
+            unless it was open before.
         lib_ref: the new symbol's name.
         pin_map: {old_pin: new_pin}.
         nets: {new_pin: net}, required for every mapped pin; extra entries connect unmapped new pins.

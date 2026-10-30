@@ -1,6 +1,6 @@
 """The mailbox between the servers and the bridge (pure Python; the bridge is faked the way Altium_API.pas's Run
 serves the queue: only the lock holder's requests, taken by a rename, progress records, the answer renamed into
-place with the request's id).
+place with the request's id once the run has closed the bridge's script project).
 
 Run from server/:  python -m unittest tests.test_mailbox -v
 """
@@ -25,13 +25,15 @@ from PIL import Image  # noqa: E402
 
 
 class FakeBridge:
-    """Altium_API.pas's Run in Python: serve the queued requests of the lock's holder, oldest first."""
+    """Altium_API.pas's Run in Python: serve the queued requests of the lock's holder, oldest first, then close the
+    bridge's script project and rename each answer into place."""
 
-    def __init__(self, root, lock, steps=3, step_seconds=0.0, stop_after_take=False, answer=None):
+    def __init__(self, root, lock, steps=3, step_seconds=0.0, stop_after_take=False, answer=None, close_seconds=0.0):
         self.root, self.lock = Path(root), Path(lock)
         self.steps, self.step_seconds, self.stop_after_take = steps, step_seconds, stop_after_take
         self.answer = answer or (lambda request: {"echo": request})
-        self.served = []
+        self.close_seconds = close_seconds
+        self.served, self.answered, self.lock_held_at_close = [], [], []
 
     def holder(self):
         try:
@@ -52,7 +54,18 @@ class FakeBridge:
             except OSError:
                 continue
             self.serve(rid, folder)
+        self.close()
         return self.served
+
+    def close(self):
+        """Run's end: the bridge's script project is closed, then each answer is renamed into place with closed.txt
+        beside it."""
+        time.sleep(self.close_seconds)
+        self.lock_held_at_close.append(self.lock.exists())
+        for folder in self.answered:
+            (folder / "closed.txt").write_text("CLOSED C:\\Users\\Public\\altium_mcp\\bridge\\0\\Altium_API.PrjScr\r\n",
+                                               encoding="cp1252")
+            os.replace(folder / "response.tmp", folder / "response.json")
 
     def serve(self, rid, folder):
         self.served.append(rid)
@@ -72,7 +85,7 @@ class FakeBridge:
         (folder / "response.tmp").write_text(json.dumps({"success": True, "request_id": rid,
                                                          "result": self.answer(request)}), encoding="cp1252")
         progress("answered", 0, 0)
-        os.replace(folder / "response.tmp", folder / "response.json")
+        self.answered.append(folder)
 
 
 def take_lock(path, pid):
@@ -281,6 +294,22 @@ class ExecuteCommandTest(Fixture):
         self.assertFalse(self.lock.exists())
         status = json.loads((self.root / "status.json").read_text(encoding="utf-8"))
         self.assertEqual((status["state"], status["id"]), ("answered", r["request_id"]))
+
+    def test_the_lock_is_held_until_the_bridge_has_closed_its_script_project(self):
+        # Run renames the answer into place only after it closed its own script project (Altium_API.pas), so the
+        # server's lock covers the close and the next caller's RunScript never meets the bridge still closing
+        bridges = []
+
+        async def altium():
+            bridges.append(FakeBridge(self.root, self.lock, steps=1, close_seconds=0.3))
+            threading.Timer(0.05, bridges[-1].run).start()
+            return True
+        main.altium_bridge.run_altium_script = altium
+        r = asyncio.run(main.altium_bridge.execute_command("get_all_nets", {}, stall=5))
+        self.assertTrue(r["success"], r)
+        self.assertEqual(bridges[0].lock_held_at_close, [True])
+        self.assertTrue(read_altium_text(Path(r["mail"]) / "closed.txt").startswith("CLOSED "))
+        self.assertFalse(self.lock.exists())
 
     def test_a_refused_runscript_is_sent_again_and_the_request_served(self):
         # Altium refuses a RunScript while another script finishes, with a box of its own; the request stays queued

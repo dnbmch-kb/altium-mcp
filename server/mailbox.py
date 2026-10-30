@@ -11,7 +11,9 @@ below; the one-script lock (script_lock.py) lets one of them in at a time. The l
             edit_spec.txt ...       the spec files the command reads
             taken                   the queue entry, moved here when the bridge takes the request
             progress.log            the bridge's progress records, one per line: seq|elapsed ms|step|count|total
-            response.json           the answer, echoing request_id; written as response.tmp and renamed
+            response.json           the answer, echoing request_id; written as response.tmp and renamed once
+                                    the run has closed the bridge's script project
+            closed.txt              how that went, one line per open copy: CLOSED, STILL OPEN or REFUSED <path>
         status.json             the call in flight, rewritten on every change, for a watchdog
         request.json, response.json   the single-file protocol of servers started before the mailbox, which the
                                 bridge keeps answering until they restart (Altium_API.pas ServeLegacy)

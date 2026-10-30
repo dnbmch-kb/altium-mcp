@@ -39,7 +39,10 @@ and in [`../server/mailbox.py`](../server/mailbox.py). What keeps it unambiguous
   a server that gave up or died is never run later: the next server under the lock moves it to its folder as
   `expired` (`mailbox.expire_others`), and a server that gives up withdraws its own entry when the bridge has not
   taken it yet (`withdrawn`).
-- **The answer appears whole**: `response.tmp`, renamed to `response.json`.
+- **The answer appears whole, once the bridge is done**: `response.tmp`, renamed to `response.json` at the end of
+  the run, after the libraries the command opened (`OpenLibraryDocument`, closed by `CloseOpenedLibraries` before
+  the answer) and then the bridge's own script project were closed; `closed.txt` beside it says how each open copy
+  under `bridge\` went. So the server holds the lock until the run is over.
 - **Progress, not a clock.** The script appends `seq|elapsed ms|step|count|total` to `progress.log` (`BridgeProgress`
   in `other_utils.pas`, the file rewritten whole and capped at 400 records; a write that meets the server reading
   is skipped). The server reads the file only when its size or time changed, gives up after `STALL_SECONDS` (120)

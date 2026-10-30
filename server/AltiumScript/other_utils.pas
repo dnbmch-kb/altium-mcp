@@ -14,6 +14,8 @@ var
     ProgressLines : TStringList;
     ProgressSeq   : Integer;
     ProgressT0    : Integer;
+    // The libraries the running request opened (OpenLibraryDocument); HandleRequest closes them before it answers
+    OpenedLibraries : TStringList;
 
 // Errors must never be modal. The server is driven by an agent with no hands:
 // a ShowMessage box blocks this script before it writes its response, every
@@ -765,18 +767,47 @@ begin
     end;
 end;
 
-// Focus a library document ('SchLib' or 'PcbLib'), opening it only when it
-// is not open yet: re-opening an open document reloads it from disk and
-// silently discards unsaved changes. Returns nil when it cannot be opened.
+// Focus a document, opening it only when it is not open yet: re-opening an
+// open document reloads it from disk and silently discards unsaved changes.
+// Returns nil when it cannot be opened. A library ('SchLib' or 'PcbLib')
+// opened here goes on OpenedLibraries, and the request closes it before it
+// answers; one that was open before the call never does, so a library the
+// operator has open stays open.
 function OpenLibraryDocument(Kind: String; Path: String): IServerDocument;
 begin
     Result := FindOpenDocument(Path);
     if (Result = nil) then
+    begin
         Result := Client.OpenDocument(Kind, Path);
+        if (Result <> nil) and ((UpperCase(Kind) = 'SCHLIB') or (UpperCase(Kind) = 'PCBLIB')) then
+            OpenedLibraries.Add(Path);
+    end;
     if (Result <> nil) then
     begin
         Client.ShowDocument(Result);
         Sleep(500);
+    end;
+end;
+
+// Close the libraries the running request opened, each by the path it was
+// opened with, saving nothing: a library read to copy a symbol or to list
+// its primitives leaves the operator's workspace with the call (a house
+// library left open raises Altium's reload question when the factory's
+// build rewrites it). Each leaves the list as it is closed, so a second call
+// closes only what is left.
+procedure CloseOpenedLibraries;
+var
+    Doc : IServerDocument;
+begin
+    while (OpenedLibraries.Count > 0) do
+    begin
+        Doc := Client.GetDocumentByPath(OpenedLibraries[0]);
+        OpenedLibraries.Delete(0);
+        if (Doc <> nil) then
+        begin
+            Doc.Modified := False;
+            Client.CloseDocument(Doc);
+        end;
     end;
 end;
 
