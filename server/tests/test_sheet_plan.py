@@ -122,6 +122,16 @@ class PlanTest(unittest.TestCase):
         self.assertTrue(any("no pin des:R9.1" in e for e in p["errors"]))
         self.assertEqual(p["labels"], [[7400, 1000, 0, 0, "SIG"]])
 
+    def test_a_later_call_plans_its_pins_around_what_an_earlier_call_drew(self):
+        r1 = part(10, "R1", (800, 950, 900, 1050), [("1", 1000, 1000, 0)])
+        r2 = part(11, "R2", (1800, 950, 1900, 1050), [("1", 1700, 1000, 2)])
+        first = self.plan([r1], [[10, "1", "AB", 1000, 1000, 0]])
+        sheet = sp.carry(dict(parts=[r1]), first)
+        self.assertEqual((sheet["wires"], sheet["labels"]), ([[1000, 1000, 1350, 1000]], [[1100, 1000, 0, 0, "AB"]]))
+        second = sp.plan(dict(sheet, parts=[r1, r2]), [[11, "1", "CD", 1700, 1000, 2]], POWER)
+        self.assertEqual(second["errors"], ["R2.1 (CD): every spot for its connection touches a wire; nothing drawn"])
+        self.assertEqual(self.plan([r1, r2], [[11, "1", "CD", 1700, 1000, 2]])["errors"], [])
+
     def test_draw_spec(self):
         p = self.plan([JP1], [[1, "1", "SDA", 1000, 1200, 2]],
                       se.draw_ops([{"op": "port", "net": "GND", "at": [500, 500], "orient": 3}]))
