@@ -2939,7 +2939,9 @@ async def edit_schematic(ctx: Context, sheet: str, ops: list, power_nets: list =
     (c:/Projects/tools/altium/sch_nets.py), not with the result alone. Every .SchLib the call opens to copy a
     symbol from is closed again at its end, saving nothing, a failed op's too; one open before the call stays open.
 
-    Components are referenced as "uid:<UNIQUEID>" (read from the file) or "des:<designator>".
+    Components are referenced as "uid:<UNIQUEID>" (read from the file) or "des:<designator>". A designator names
+    every record of a multi-part part: relink changes each record, attach_pin, detach_pin and no_erc_pins act on
+    each record that shows the pin, and replace refuses one naming more than one record (replace each part by uid).
 
     Args:
         sheet: full path of the .SchDoc (opened if it is not).

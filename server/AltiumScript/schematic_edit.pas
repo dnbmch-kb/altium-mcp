@@ -125,25 +125,40 @@ begin
     if (Obj <> nil) then EdRemove(Obj);
 end;
 
-// "uid:XXXX" or "des:R5"
-function EdFindComp(Ref: String): ISch_Component;
+// The N-th record (from 1) "uid:XXXX" or "des:R5" names, nil past the last. A designator names every record of a
+// multi-part part (CTRL's U804_G1, three); a unique id one record
+function EdFindComp(Ref: String; N: Integer): ISch_Component;
 var
     Iter : ISch_Iterator;
     Obj  : ISch_Component;
     Key  : String;
+    Seen : Integer;
 begin
     Result := nil;
+    if (Copy(Ref, 1, 4) = 'uid:') and (N > 1) then Exit;
     Key := Copy(Ref, 5, Length(Ref));
+    Seen := 0;
     Iter := EdDoc.SchIterator_Create;
     Iter.AddFilter_ObjectSet(MkSet(eSchComponent));
     Obj := Iter.FirstSchObject;
     while (Obj <> nil) and (Result = nil) do
     begin
-        if (Copy(Ref, 1, 4) = 'uid:') and (Obj.UniqueId = Key) then Result := Obj;
-        if (Copy(Ref, 1, 4) = 'des:') and (Obj.Designator.Text = Key) then Result := Obj;
+        if ((Copy(Ref, 1, 4) = 'uid:') and (Obj.UniqueId = Key)) or
+           ((Copy(Ref, 1, 4) = 'des:') and (Obj.Designator.Text = Key)) then
+        begin
+            Seen := Seen + 1;
+            if (Seen = N) then Result := Obj;
+        end;
         Obj := Iter.NextSchObject;
     end;
     EdDoc.SchIterator_Destroy(Iter);
+end;
+
+// How many records Ref names
+function EdCompCount(Ref: String): Integer;
+begin
+    Result := 0;
+    while (EdFindComp(Ref, Result + 1) <> nil) do Result := Result + 1;
 end;
 
 function EdFindPin(Comp: ISch_Component; Des: String): ISch_Pin;
@@ -1161,7 +1176,7 @@ function EditSchematicFromSpec(SpecPath: String): String;
 var
     Spec                 : TStringList;
     Rec, Kind, Saved     : String;
-    i, j, D, X, Y        : Integer;
+    i, j, k, n, D, X, Y  : Integer;
     Orient, Mirror       : Integer;
     Obj                  : ISch_GraphicalObject;
     Comp, Old            : ISch_Component;
@@ -1222,7 +1237,7 @@ begin
         end
         else if (Kind = 'DELCOMP') then
         begin
-            Comp := EdFindComp('uid:' + GetFieldFromPipeString(Rec, 1));
+            Comp := EdFindComp('uid:' + GetFieldFromPipeString(Rec, 1), 1);
             if (Comp = nil) then EdError(Rec, 'no component with that unique id')
             else EdDeleteComponent(Comp, GetFieldFromPipeString(Rec, 2) = '1', GetFieldFromPipeString(Rec, 3));
         end
@@ -1264,24 +1279,27 @@ begin
                 EdPlaceNetAt(X, Y, 1, GetFieldFromPipeString(Rec, 2));
             end;
         end
-        else if (Kind = 'ATTACH') or (Kind = 'NOERC') then
+        else if (Kind = 'ATTACH') or (Kind = 'NOERC') or (Kind = 'DETACH') then
         begin
-            Comp := EdFindComp(GetFieldFromPipeString(Rec, 1));
-            Obj := nil;
-            if (Comp <> nil) then Obj := EdFindPin(Comp, GetFieldFromPipeString(Rec, 2));
-            if (Obj = nil) then EdError(Rec, 'no such component or pin')
-            else
+            // every record of the part that shows the pin (des: names each part of a multi-part part)
+            j := 0;
+            n := 1;
+            Comp := EdFindComp(GetFieldFromPipeString(Rec, 1), n);
+            while (Comp <> nil) do
             begin
-                EdPinEnd(Obj, X, Y, D);
-                if (Kind = 'ATTACH') then EdPend(Comp, GetFieldFromPipeString(Rec, 2), GetFieldFromPipeString(Rec, 3), X, Y, D)
-                else EdNoErc(X, Y);
+                Obj := EdFindPin(Comp, GetFieldFromPipeString(Rec, 2));
+                if (Obj <> nil) then
+                begin
+                    j := j + 1;
+                    EdPinEnd(Obj, X, Y, D);
+                    if (Kind = 'ATTACH') then EdPend(Comp, GetFieldFromPipeString(Rec, 2), GetFieldFromPipeString(Rec, 3), X, Y, D)
+                    else if (Kind = 'NOERC') then EdNoErc(X, Y)
+                    else EdDetach(Comp, GetFieldFromPipeString(Rec, 2), Rec);
+                end;
+                n := n + 1;
+                Comp := EdFindComp(GetFieldFromPipeString(Rec, 1), n);
             end;
-        end
-        else if (Kind = 'DETACH') then
-        begin
-            Comp := EdFindComp(GetFieldFromPipeString(Rec, 1));
-            if (Comp = nil) then EdError(Rec, 'no such component')
-            else EdDetach(Comp, GetFieldFromPipeString(Rec, 2), Rec);
+            if (j = 0) then EdError(Rec, 'no such component or pin');
         end
         else if (Kind = 'ENTRY') then
             EdAttachEntry(GetFieldFromPipeString(Rec, 1), GetFieldFromPipeString(Rec, 2), GetFieldFromPipeString(Rec, 3), Rec)
@@ -1307,12 +1325,16 @@ begin
         end
         else if (Kind = 'REPLACE') then
         begin
-            Old := EdFindComp(GetFieldFromPipeString(Rec, 1));
+            // one record: a multi-part part's parts are replaced one by one, by uid
+            n := EdCompCount(GetFieldFromPipeString(Rec, 1));
+            Old := nil;
+            if (n = 1) then Old := EdFindComp(GetFieldFromPipeString(Rec, 1), 1);
             Comp := nil;
             if (Old <> nil) then Comp := EdReplicate(GetFieldFromPipeString(Rec, 2), GetFieldFromPipeString(Rec, 3));
             if (Comp = nil) then
             begin
-                if (Old = nil) then EdError(Rec, 'no such component') else EdError(Rec, 'symbol not found in the library');
+                if (n > 1) then EdError(Rec, 'the designator names ' + IntToStr(n) + ' records (a multi-part part): replace each by uid')
+                else if (Old = nil) then EdError(Rec, 'no such component') else EdError(Rec, 'symbol not found in the library');
                 EdSkipBlock(Spec, i);
             end
             else
@@ -1340,18 +1362,25 @@ begin
         end
         else if (Kind = 'RELINK') then
         begin
-            Comp := EdFindComp(GetFieldFromPipeString(Rec, 1));
-            if (Comp = nil) then
+            // every record the reference names, each with the block's parameters and reported in placed
+            n := EdCompCount(GetFieldFromPipeString(Rec, 1));
+            if (n = 0) then
             begin
                 EdError(Rec, 'no such component');
                 EdSkipBlock(Spec, i);
             end
             else
             begin
-                EdBeginModify(Comp);
-                EdSetLink(Comp, Rec, 2, 7);
-                EdEndModify(Comp);
-                EdFinishPart(Comp, Spec, i, Rec);
+                j := i;
+                for k := 1 to n do
+                begin
+                    i := j;
+                    Comp := EdFindComp(GetFieldFromPipeString(Rec, 1), k);
+                    EdBeginModify(Comp);
+                    EdSetLink(Comp, Rec, 2, 7);
+                    EdEndModify(Comp);
+                    EdFinishPart(Comp, Spec, i, Rec);
+                end;
             end;
         end
         else if (Kind = 'WIRE') then
