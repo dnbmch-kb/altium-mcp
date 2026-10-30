@@ -31,3 +31,9 @@ worked around by a script in that session. A row fixed on a branch stays until i
   false) and `sch_check.py` reports `net label ND3 x net label ND3`; the nets read back right. Fix: an old end whose
   wiring carries the net's label gets none, and a new pin whose end sits on wiring of its own net needs no stub and
   is no error. Done: that replace answers only the unmapped pin's error and `sch_check.py` shows no label overlap.
+- **A board command with no board current opens the focused project's board** (`EnsureDocumentFocused`,
+  `server/AltiumScript/other_utils.pas`): `check_placement` with no PcbDoc open, sent as a compile smoke call
+  (2026-10-30), opened the operator's focused `LED240.PcbDoc` and checked against it; `closedocs.py` closed it again.
+  Every command in its PCB list does the same, and acts on whichever board that is. Fix: a board command without a
+  `board` argument refuses when no board is current, naming the focused project, and opens nothing. Done: that call
+  answers the refusal and `closedocs.py` on the project's board reports `not_open`.
