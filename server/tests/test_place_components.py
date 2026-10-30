@@ -42,24 +42,40 @@ class PlaceTest(unittest.TestCase):
     def tearDown(self):
         main.altium_bridge.execute_command = self.saved
 
-    def run_tool(self, placements, board=""):
-        return json.loads(asyncio.run(main.place_components(None, placements, board)))
+    def run_tool(self, placements, board="", **kw):
+        return json.loads(asyncio.run(main.place_components(None, placements, board, **kw)))
 
     def test_a_bottom_part_is_sent_with_altiums_angle_and_read_back_in_both(self):
-        self.answer = {"board": "C:/b/A.PcbDoc", "placed_count": 1, "missing_designators": [],
-                       "components": [{"designator": "J4", "x": 1300, "y": 1000, "rotation": 270,
-                                       "layer": "Bottom Layer"}]}
+        self.answer = {"board": "C:/b/A.PcbDoc", "saved": "C:/b/A.PcbDoc", "placed_count": 1,
+                       "missing_designators": [], "components": [{"designator": "J4", "x": 1300, "y": 1000,
+                                                                  "rotation": 270, "layer": "Bottom Layer"}]}
         r = self.run_tool([{"designator": "J4", "x": 1300, "y": 1000, "rotation": 90, "side": "bottom"}],
                           "C:/b/A.PcbDoc")
-        self.assertEqual(self.sent[0][1], {"placements": ["J4|1300.0|1000.0|270.0|bottom"], "board": "C:\\b\\A.PcbDoc"})
+        self.assertEqual(self.sent[0][1], {"placements": ["J4|1300.0|1000.0|270.0|bottom"], "save": True,
+                                           "board": "C:\\b\\A.PcbDoc"})
         self.assertTrue(r["success"], r)
         self.assertEqual(r["components"][0], {"designator": "J4", "x": 1300, "y": 1000, "rotation": 90.0,
                                               "side": "bottom", "altium_rotation": 270.0})
 
+    def test_the_board_is_saved_unless_save_is_false(self):
+        # PM-1 chains (2026-10-24): the rules step after an unsaved placement refused the board
+        part = {"designator": "R1", "x": 0, "y": 0, "rotation": 0, "layer": "Top Layer"}
+        self.answer = {"board": "C:/b/A.PcbDoc", "saved": "", "placed_count": 1, "missing_designators": [],
+                       "components": [part]}
+        r = self.run_tool([{"designator": "R1", "x": 0, "y": 0}])
+        self.assertEqual(self.sent[-1][1]["save"], True)
+        self.assertEqual(r["errors"], ["C:/b/A.PcbDoc was not saved: it still holds unsaved changes"])
+        self.assertFalse(r["success"])
+        self.answer["components"] = [dict(part)]
+        r = self.run_tool([{"designator": "R1", "x": 0, "y": 0}], save=False)
+        self.assertEqual(self.sent[-1][1]["save"], False)
+        self.assertTrue(r["success"], r)
+
     def test_a_rotation_the_board_did_not_hold_is_an_error(self):
         # LED240: the tool reported R1 at 180 while the board kept 0
-        self.answer = {"board": "C:/b/LED240.PcbDoc", "placed_count": 1, "missing_designators": [],
-                       "components": [{"designator": "R1", "x": 0, "y": -551.18, "rotation": 0, "layer": "Top Layer"}]}
+        self.answer = {"board": "C:/b/LED240.PcbDoc", "saved": "C:/b/LED240.PcbDoc", "placed_count": 1,
+                       "missing_designators": [], "components": [{"designator": "R1", "x": 0, "y": -551.18,
+                                                                  "rotation": 0, "layer": "Top Layer"}]}
         r = self.run_tool([{"designator": "R1", "x": 0, "y": -551.18, "rotation": 180, "side": "top"}])
         self.assertFalse(r["success"])
         self.assertEqual(r["errors"], ["R1 holds rotation 0 (Altium 0), not 180"])

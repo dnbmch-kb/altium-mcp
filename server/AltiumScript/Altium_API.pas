@@ -733,8 +733,10 @@ var
     i: Integer;
     PlacementsList: TStringList;
     BoardPath: String;
+    Save: Boolean;
 begin
     BoardPath := '';
+    Save := False;
     // Placements arrive as an array of pipe-delimited strings
     // ('Designator|X|Y|Rotation|Layer') so the line-based parser stays robust
     PlacementsList := TStringList.Create;
@@ -745,6 +747,8 @@ begin
         begin
             if (Pos('"board"', RequestData[i]) > 0) then
                 BoardPath := JSONLineValue(RequestData[i]);
+            if (Pos('"save"', RequestData[i]) > 0) then
+                Save := LowerCase(JSONLineValue(RequestData[i])) = 'true';
             // Look for placements array
             if (Pos('"placements"', RequestData[i]) > 0) then
             begin
@@ -769,7 +773,7 @@ begin
 
         if PlacementsList.Count > 0 then
         begin
-            Result := PlaceComponentsFromList(PlacementsList, BoardPath);
+            Result := PlaceComponentsFromList(PlacementsList, BoardPath, Save);
         end
         else
         begin

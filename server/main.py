@@ -2051,7 +2051,7 @@ def side_rotation(stored: float, side: str) -> float:
 
 
 @mcp.tool()
-async def place_components(ctx: Context, placements: list, board: str = "") -> str:
+async def place_components(ctx: Context, placements: list, board: str = "", save: bool = True) -> str:
     """
     Place multiple components at absolute positions in a single Altium transaction.
 
@@ -2059,7 +2059,9 @@ async def place_components(ctx: Context, placements: list, board: str = "") -> s
     placing more than one component, since every tool call is a full round
     trip into Altium. The whole batch is one undo step. Every part is read back
     from the board after the transaction; a part that does not hold what was set
-    is an error. The board is not saved.
+    is an error. The board is then saved (save true, the default), so a rules
+    step, DRC, ECO or file read after it meets the placement; with save a board
+    that already holds unsaved changes is refused before anything moves.
 
     Coordinate conventions: x/y are in mils relative to the board origin;
     rotation is in degrees counter-clockwise as seen from the top. A bottom
@@ -2078,15 +2080,19 @@ async def place_components(ctx: Context, placements: list, board: str = "") -> s
               mirrored when it changes side. Omit to keep the current side.
         board (str, optional): full path of the .PcbDoc to place on; it is
             shown first and checked. Default: the current board.
+        save (bool, optional): save the board after the placement (default
+            true); false leaves it unsaved and takes a board with unsaved
+            changes.
 
     Example:
         placements=[{"designator": "R1", "x": 1000, "y": 2000, "rotation": 90},
                     {"designator": "J4", "x": 1050, "y": 2000, "rotation": 90, "side": "bottom"}]
 
     Returns:
-        str: JSON with success, board, placed_count, missing_designators, components
-             [{designator, x, y, side, rotation, altium_rotation}] as the board holds them
-             after the transaction, and errors for every part that does not hold its request
+        str: JSON with success, board, saved (its path once saved, else ""), placed_count,
+             missing_designators, components [{designator, x, y, side, rotation, altium_rotation}]
+             as the board holds them after the transaction, and errors for every part that does
+             not hold its request and for a board left unsaved with save
     """
     logger.info(f"Placing {len(placements)} components")
 
@@ -2132,7 +2138,7 @@ async def place_components(ctx: Context, placements: list, board: str = "") -> s
     if board and (not Path(board).is_absolute() or Path(board).suffix.lower() != ".pcbdoc"):
         return json.dumps({"success": False, "error": f"board must be the full path of a .PcbDoc: {board}"})
 
-    params = {"placements": entries}
+    params = {"placements": entries, "save": bool(save)}
     if board:
         params["board"] = str(Path(board))
     response = await altium_bridge.execute_command("place_components", params)
@@ -2148,6 +2154,8 @@ async def place_components(ctx: Context, placements: list, board: str = "") -> s
         except ValueError:
             return json.dumps({"success": False, "error": "unreadable answer", "raw_response": result[:500]})
     result["errors"] = placement_mismatches(result.get("components", []), wanted)
+    if save and not result.get("saved"):
+        result["errors"].append(f"{result.get('board')} was not saved: it still holds unsaved changes")
     result["success"] = not result["errors"] and not result.get("missing_designators")
     return json.dumps(result, indent=2)
 

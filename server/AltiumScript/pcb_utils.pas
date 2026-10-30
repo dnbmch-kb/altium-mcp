@@ -2490,9 +2490,13 @@ end;
 // Each entry in PlacementsList is 'Designator|X|Y|Rotation|Layer' where X/Y
 // are mils relative to the board origin, Rotation is degrees CCW (-1 = keep
 // current) and Layer is 'top', 'bottom' or '' (keep current side).
-function PlaceComponentsFromList(PlacementsList: TStringList; BoardPath: String): String;
+// Save: the board is saved after the read-back, and a board already holding unsaved changes is refused before anything
+// moves (those changes are not this call's to save), as the tools' board scripts refuse it
+function PlaceComponentsFromList(PlacementsList: TStringList; BoardPath: String; Save: Boolean): String;
 var
     Board            : IPCB_Board;
+    SrvDoc           : IServerDocument;
+    Saved            : String;
     Component        : IPCB_Component;
     ResultProps      : TStringList;
     MissingArray     : TStringList;
@@ -2524,6 +2528,13 @@ begin
     if (BoardPath <> '') and (NormalizedPath(Board.FileName) <> NormalizedPath(BoardPath)) then
     begin
         Result := 'ERROR: the active board is ' + Board.FileName + ', not ' + BoardPath;
+        Exit;
+    end;
+    SrvDoc := FindOpenDocument(Board.FileName);
+    if Save and SrvDoc.Modified then
+    begin
+        Result := 'ERROR: ' + Board.FileName + ' holds unsaved changes, so nothing was placed: save it first, ' +
+                  'or place with save false';
         Exit;
     end;
 
@@ -2609,7 +2620,16 @@ begin
             end;
         end;
 
+        Saved := '';
+        if Save then
+        begin
+            SrvDoc.Modified := True;
+            SrvDoc.DoFileSave('');
+            if not SrvDoc.Modified then Saved := Board.FileName;
+        end;
+
         AddJSONProperty(ResultProps, 'board', Board.FileName);
+        AddJSONProperty(ResultProps, 'saved', Saved);
         AddJSONInteger(ResultProps, 'placed_count', PlacedCount);
 
         if (MissingArray.Count > 0) then
