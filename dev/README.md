@@ -247,6 +247,10 @@ Each found on a board and checked by a readback; the date and the board say wher
   `<>`, but does not convert to text (edit_schematic's first live two-pass run, 2026-10-23).
 - **A design rule's enable flag is `DRCEnabled`**; the saved `ENABLED` field follows it, `Enabled` is not stored
   (raw-head adapter, 2026-10-23).
+- **`Between` is no variable name**: a unit declaring `Between : String` does not compile - every RunScript of the
+  bridge met Altium's `Error` box "Unknown identifier: Between" before the script ran (check_placement's
+  courtyard measure, 2026-10-30); `Far` does the same (edit_schematic's `sheet_port`). DelphiScript reserves words
+  Delphi does not: a new identifier is proven by one live call.
 - **A routine is known only below its declaration in its own unit.** `TakeViewScreenshot` calling `PrintView`
   further down `other_utils.pas` raised "Undeclared identifier: PrintView" when the call ran (a box, the script
   ended); a routine of another unit of the project resolves wherever it is (the bridge's first print, 2026-10-23).

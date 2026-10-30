@@ -2314,9 +2314,9 @@ end;
 
 // The courtyard measure's gap in mils between two components, each kept out by its courtyard (CourtyardBox) or, with
 // none, by its copper: courtyards and a courtyard against copper as boxes, copper against copper by Altium's distance.
-// Between names what was compared; -1 when one has neither
+// Compared names what was compared; -1 when one has neither
 function KeepOutGap(Board: IPCB_Board; CompA, CompB: IPCB_Component; CourtLayers: TStringList;
-                    var Between: String): Double;
+                    var Compared: String): Double;
 var
     HasA, HasB                     : Boolean;
     LA, BA, RA, TA, LB, BB, RB, TB : Integer;
@@ -2325,22 +2325,22 @@ begin
     HasB := CourtyardBox(CompB, CourtLayers, LB, BB, RB, TB);
     if HasA and HasB then
     begin
-        Between := 'courtyards';
+        Compared := 'courtyards';
         Result := BoxGapMils(LA, BA, RA, TA, LB, BB, RB, TB);
     end
     else if HasA then
     begin
-        Between := 'courtyard and copper';
+        Compared := 'courtyard and copper';
         Result := CourtyardCopperGap(CompB, CourtLayers, LA, BA, RA, TA);
     end
     else if HasB then
     begin
-        Between := 'courtyard and copper';
+        Compared := 'courtyard and copper';
         Result := CourtyardCopperGap(CompA, CourtLayers, LB, BB, RB, TB);
     end
     else
     begin
-        Between := 'copper';
+        Compared := 'copper';
         Result := KindMinDistance(Board, CompA, CompB, 'C', 'C', CourtLayers);
     end;
 end;
@@ -2369,7 +2369,7 @@ var
     ResultProps     : TStringList;
     RectA, RectB    : TCoordRect;
     Designator      : String;
-    Between         : String;
+    Compared        : String;
     i               : Integer;
     OverlapX, OverlapY : Double;
     Separation      : Double;
@@ -2460,7 +2460,7 @@ begin
                         PairsChecked := PairsChecked + 1;
                         if Courtyard then
                         begin
-                            DistMils := KeepOutGap(Board, Target, Other, CourtIds, Between);
+                            DistMils := KeepOutGap(Board, Target, Other, CourtIds, Compared);
                             IsOverlap := (DistMils = 0);
                             SilkMils := KindMinDistance(Board, Target, Other, 'S', 'S', CourtIds);
                             if (SilkMils >= 0) and (SilkMils < ClearanceMils) then
@@ -2495,7 +2495,7 @@ begin
                                         AddJSONProperty(VProps, 'type', 'overlap')
                                     else
                                         AddJSONProperty(VProps, 'type', 'clearance');
-                                    AddJSONProperty(VProps, 'between', Between);
+                                    AddJSONProperty(VProps, 'between', Compared);
                                 end
                                 else if IsOverlap then
                                     AddJSONProperty(VProps, 'type', 'bounding_box_overlap')
