@@ -78,8 +78,11 @@ begin
 
     try
         // === BEGIN EXPERIMENT (rewritten by dev/sandbox_runner.py) ===
-        SandboxLog('no experiment loaded');
-        ResultText := '{"ok": true}';
+        S1 := 'dev probe: ';
+        for I1 := 0 to GetWorkspace.DM_ProjectCount - 1 do S1 := S1 + GetWorkspace.DM_Projects(I1).DM_ProjectFileName + '; ';
+        Obj1 := Client.GetDocumentByPath('C:\Projectsltium-mcp\server\SandboxScript\Sandbox.pas');
+        if Obj1 = nil then S1 := S1 + ' server Sandbox.pas not loaded' else begin if Obj1.Modified then S1 := S1 + ' server Sandbox.pas loaded MODIFIED' else S1 := S1 + ' server Sandbox.pas loaded clean'; end;
+        ResultText := S1;
         // === END EXPERIMENT ===
     except
         SandboxLog('EXCEPTION escaped the experiment body');

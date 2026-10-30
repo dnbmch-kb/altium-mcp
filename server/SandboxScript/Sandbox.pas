@@ -44,7 +44,18 @@ begin
 
     try
         // === BEGIN EXPERIMENT (rewritten by the run_altium_script tool) ===
-        SandboxLog('no script loaded');
+        SandboxLog('doc');
+        Obj1 := SchServer.GetSchDocumentByPath('C:\Projects\ugv\ugv-pcb\PWRBASE\PWRBASE.SchDoc');
+        SchServer.ProcessControl.PreProcess(Obj1, '');
+        SandboxLog('new marker at U20.6 end, Altium default');
+        Obj4 := SchServer.SchObjectFactory(eNoERC, eCreate_Default);
+        Obj4.Location := Point(MilsToCoord(38750), MilsToCoord(2400));
+        Obj1.RegisterSchObjectInContainer(Obj4);
+        SchServer.RobotManager.SendMessage(Obj1.I_ObjectAddress, c_BroadCast, SCHM_PrimitiveRegistration, Obj4.I_ObjectAddress);
+        SandboxLog('registered: active ' + BoolToStr(Obj4.IsActive) + ' suppressall ' + BoolToStr(Obj4.SuppressAll) + ' orient ' + IntToStr(Obj4.Orientation) + ' symbol ' + IntToStr(Obj4.Symbol));
+        SchServer.ProcessControl.PostProcess(Obj1, '');
+        Obj1.GraphicallyInvalidate;
+        ResultText := 'placed a default NoERC at 38750,2400';
         // === END EXPERIMENT ===
     except
         SandboxLog('EXCEPTION escaped the script body');
