@@ -73,6 +73,23 @@ class EditSpecTest(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, "comment_at"):
                 self.spec([dict(op, comment_at=bad)])
 
+    def test_sheet_ports_go_to_the_second_pass_by_net_io_and_side(self):
+        ops = [{"op": "sheet_port", "net": "TXD", "io": "in", "side": "left"},
+               {"op": "sheet_port", "net": "RXD", "io": "out", "side": "right"},
+               {"op": "sheet_port", "net": "CANH", "io": "bidi", "side": "right"},
+               {"op": "sheet_port", "net": "SHDN", "io": "unspecified", "side": "left"}]
+        self.assertEqual(se.sheet_port_lines(ops), ["SHEETPORT|TXD|2|left", "SHEETPORT|RXD|1|right",
+                                                    "SHEETPORT|CANH|3|right", "SHEETPORT|SHDN|0|left"])
+        self.assertFalse([l for l in self.spec(ops) if l.startswith("SHEETPORT")])    # not in the first pass
+        port = ops[0]
+        for bad, msg in ((dict(port, io="input"), "io is one of"),
+                         (dict(port, side="up"), "side is left or right"),
+                         ({"op": "sheet_port", "net": "TXD", "io": "in"}, "missing 'side'"),
+                         (dict(port, net="A|B"), "may not contain"),
+                         ([port, dict(port, side="right")], "a second sheet port for TXD")):
+            with self.subTest(msg=msg), self.assertRaisesRegex(ValueError, msg):
+                self.spec(bad if isinstance(bad, list) else [bad])
+
     def test_description_and_a_description_parameter_set_the_component_description(self):
         op = {"op": "place", "designator": "C1", "symbol_library": str(self.lib), "lib_ref": "CAP",
               "x": 0, "y": 0, "link_library": "Cap-Gen.DbLib", "description": "CAP CER 0.1UF 50V X7R 0402",
@@ -384,6 +401,36 @@ class TwoPassTest(unittest.TestCase):
         first, second = self.specs
         self.assertEqual(first[-4:], ["PIN|1|SDA|-1|-1", "COMMENT_AT|300|-200", "END", "GEOMETRY"])
         self.assertNotIn("COMMENT_AT|300|-200", second)
+
+    def test_a_sheet_port_is_drawn_after_the_plan_on_its_labels_stub(self):
+        geometry = {"parts": [{"key": 77, "designator": "JP1", "body": [1100, 950, 1300, 1250],
+                               "pins": [["1", 1000, 1100, 2, 1100, 1100]], "texts": []}],
+                    "labels": [], "ports": [], "wires": []}
+        self.answers = [{"success": True, "sheet": str(self.sheet), "saved": "", "ops": 1, "errors": [],
+                         "placed": [self.placed()], "pending": [[77, "1", "SDA", 1000, 1100, 2]],
+                         "geometry": geometry},
+                        {"success": True, "sheet": str(self.sheet), "saved": str(self.sheet), "ops": 0,
+                         "errors": [], "placed": [], "pending": [], "geometry": None}]
+        r = self.run_tool([{"op": "place", "designator": "JP1", "symbol_library": str(self.lib), "lib_ref": "HDR3",
+                            "x": 1200, "y": 1100, "link_library": "dnbm.IntLib", "pins": {"1": "SDA"}},
+                           {"op": "sheet_port", "net": "SDA", "io": "bidi", "side": "left"}])
+        self.assertTrue(r["success"], r)
+        first, second = self.specs
+        self.assertNotIn("SHEETPORT|SDA|3|left", first)
+        self.assertEqual(second, [f"SHEET|{self.sheet}", "WIRE|1000|1100|600|1100", "LABEL|600|1100|0|0|SDA",
+                                  "SHEETPORT|SDA|3|left", "SAVE"])
+
+    def test_sheet_ports_alone_still_take_the_second_pass(self):
+        geometry = {"parts": [], "labels": [[600, 1100, 0, 0, "SDA"]], "ports": [], "wires": [[1000, 1100, 600, 1100]]}
+        self.answers = [{"success": True, "sheet": str(self.sheet), "saved": "", "ops": 0, "errors": [],
+                         "placed": [], "pending": [], "geometry": geometry},
+                        {"success": True, "sheet": str(self.sheet), "saved": str(self.sheet), "ops": 0,
+                         "errors": [], "placed": [], "pending": [], "geometry": None}]
+        r = self.run_tool([{"op": "sheet_port", "net": "SDA", "io": "in", "side": "left"}])
+        self.assertTrue(r["success"], r)
+        first, second = self.specs
+        self.assertEqual(first[-1], "GEOMETRY")
+        self.assertEqual(second, [f"SHEET|{self.sheet}", "SHEETPORT|SDA|2|left", "SAVE"])
 
     def test_what_the_bridge_removed_comes_back(self):
         removed = [{"uid": "WIREAAAA", "kind": "wire", "text": ""}, {"uid": "LBLBBBBB", "kind": "label", "text": "SDA"}]

@@ -13,6 +13,8 @@ SUPPLY_STYLE = (2, 1, True)
 GROUND_STYLE = (4, 3, True)                                    # another ground net keeps its name
 DRAW_OPS = ("wire", "junction", "port")                        # drawn in the second pass, from the reported pins
 CONNECTIONS = ("PIN", "MAP", "ATTACH")                         # spec lines whose connection sheet_plan places
+# a sheet port's I/O type as Altium numbers it (TPortIO), seen from the sheet
+PORT_IO = {"unspecified": 0, "out": 1, "in": 2, "bidi": 3}
 
 _REQUIRED = {
     "delete": ("uid",),
@@ -31,6 +33,7 @@ _REQUIRED = {
     "wire": ("points",),
     "junction": ("at",),
     "port": ("net", "at", "orient"),
+    "sheet_port": ("net", "io", "side"),
 }
 
 
@@ -119,6 +122,30 @@ def draw_ops(ops):
             if "style" in op:
                 port["style"] = int(op["style"])
             out.append(port)
+    return out
+
+
+def sheet_port_lines(ops):
+    """The sheet_port ops as SHEETPORT|net|io|side lines, checked, for the end of the second pass: each port goes on
+    the free end of a stub carrying its net's label, the stub's free end pointing side, once the plan has drawn it.
+    edit_spec leaves them out. One port per net."""
+    out, seen = [], set()
+    for i, op in enumerate(ops):
+        if op.get("op") != "sheet_port":
+            continue
+        what = f"op {i} (sheet_port)"
+        for key in _REQUIRED["sheet_port"]:
+            if key not in op:
+                raise ValueError(f"{what}: missing '{key}'")
+        net = _text(op["net"], what + " net")
+        if op["io"] not in PORT_IO:
+            raise ValueError(f"{what}: io is one of {', '.join(PORT_IO)}: {op['io']!r}")
+        if op["side"] not in ("left", "right"):
+            raise ValueError(f"{what}: side is left or right, the way its stub's free end points: {op['side']!r}")
+        if net in seen:
+            raise ValueError(f"{what}: a second sheet port for {net}")
+        seen.add(net)
+        out.append(f"SHEETPORT|{net}|{PORT_IO[op['io']]}|{op['side']}")
     return out
 
 
@@ -213,6 +240,7 @@ def edit_spec(sheet, ops, power_nets=None, save=True):
     if not ops:
         raise ValueError("no ops given")
     draw_ops(ops)
+    sheet_port_lines(ops)
     power = power_table(power_nets)
     lines = [f"SHEET|{path}"] + [f"POWERNET|{n}|{s}|{o}|{1 if shown else 0}" for n, (s, o, shown) in power.items()]
     for i, op in enumerate(ops):
@@ -220,7 +248,7 @@ def edit_spec(sheet, ops, power_nets=None, save=True):
         what = f"op {i} ({kind})"
         if kind not in _REQUIRED:
             raise ValueError(f"{what}: unknown op; known: {', '.join(sorted(_REQUIRED))}")
-        if kind in DRAW_OPS:
+        if kind in DRAW_OPS or kind == "sheet_port":
             continue
         for key in _REQUIRED[kind]:
             if key not in op:

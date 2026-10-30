@@ -6,7 +6,7 @@
 // reported in "errors" and changes nothing; the rest of the spec still runs. A pin's new connection (PIN, MAP,
 // ATTACH) is not drawn here: it is reported in "pending", GEOMETRY reports the sheet's parts and connection
 // objects, server/sheet_plan.py plans where each connection goes, and a second spec draws the plan with WIRE,
-// JUNCTION, LABEL and PORT lines.
+// JUNCTION, LABEL and PORT lines, then a child sheet's ports on the drawn label stubs with SHEETPORT lines.
 
 const
     ED_STUB = 100;          // mils
@@ -1122,25 +1122,16 @@ begin
     EdDoc.SchIterator_Destroy(Iter);
 end;
 
-// A net label's new text, and its stub redrawn as long as the text (the house rule: a label's stub as long as its
-// text, on the 50 mil grid). The stub is the one wire under a horizontal label, two vertices, horizontal, one end on a
-// pin or wire (P) and the other free (F). A label whose text runs back toward P moves to F, the stub its text's width;
-// one whose text runs on toward F from inside the stub keeps its spot, the stub reaching past its text's end. Its
-// width is the text's own extent in Altium. A label on anything else, or hanging off its stub's end (a 100 mil
-// connection stub), keeps its wiring; one whose redrawn stub would meet something keeps its old text, the op refused.
-procedure EdRenameLabel(Lbl: ISch_GraphicalObject; Text: String; Line: String);
+// The stub under a horizontal label: the one wire under it, two vertices, horizontal on the line Y, one end on a pin
+// or wire (PX) and the other free (FX); nil when the label sits on anything else
+function EdLabelStub(Lbl: ISch_GraphicalObject; var PX: Integer; var FX: Integer; var Y: Integer): ISch_GraphicalObject;
 var
-    Iter               : ISch_Iterator;
-    W, Stub            : ISch_GraphicalObject;
-    Rect               : IDispatch;
-    OldText, What      : String;
-    AX, AY, X1, X2, Y  : Integer;
-    PX, FX, NF, S, J   : Integer;
-    N, Len, TW, NL     : Integer;
-    L1, L2, Back       : Boolean;
+    Iter              : ISch_Iterator;
+    W, Stub           : ISch_GraphicalObject;
+    AX, AY, X1, X2, N : Integer;
+    L1, L2            : Boolean;
 begin
-    OldText := Lbl.Text;
-    EdSetText(Lbl, Text);
+    Result := nil;
     if (Lbl.Orientation <> 0) then Exit;
     AX := CoordToMils(Lbl.Location.X);
     AY := CoordToMils(Lbl.Location.Y);
@@ -1179,6 +1170,30 @@ begin
         PX := X2;
         FX := X1;
     end;
+    Result := Stub;
+end;
+
+// A net label's new text, and its stub (EdLabelStub) redrawn as long as the text (the house rule: a label's stub as
+// long as its text, on the 50 mil grid). A label whose text runs back toward the stub's fixed end moves to its free
+// end, the stub its text's width; one whose text runs on toward the free end from inside the stub keeps its spot, the
+// stub reaching past its text's end. Its width is the text's own extent in Altium. A label on anything else, or
+// hanging off its stub's end (a 100 mil connection stub), keeps its wiring; one whose redrawn stub would meet
+// something keeps its old text, the op refused.
+procedure EdRenameLabel(Lbl: ISch_GraphicalObject; Text: String; Line: String);
+var
+    Stub               : ISch_GraphicalObject;
+    Rect               : IDispatch;
+    OldText, What      : String;
+    AX, Y              : Integer;
+    PX, FX, NF, S, J   : Integer;
+    Len, TW, NL        : Integer;
+    Back               : Boolean;
+begin
+    OldText := Lbl.Text;
+    EdSetText(Lbl, Text);
+    Stub := EdLabelStub(Lbl, PX, FX, Y);
+    if (Stub = nil) then Exit;
+    AX := CoordToMils(Lbl.Location.X);
     if (FX > PX) then S := 1 else S := -1;
     Len := Abs(FX - PX);
 
@@ -1217,6 +1232,69 @@ begin
         Lbl.Location := Point(MilsToCoord(NF), MilsToCoord(Y));
         EdEndModify(Lbl);
     end;
+end;
+
+// SHEETPORT|net|io|side, after the plan is drawn: a child sheet's port on the free end of the first stub (EdLabelStub)
+// carrying a label of Net whose free end points Side, running on that way, as wide as its name plus 100 mil on the
+// 50 mil grid (the house rule; the label's measured text gives the name's width), its I/O type IO (0 unspecified,
+// 1 output, 2 input, 3 bidirectional), both arrows as schgen draws them. Refused, naming it, where its far end would
+// meet anything; a port joins at both ends.
+procedure EdSheetPort(Net: String; IO: Integer; Side: String; Line: String);
+var
+    Iter           : ISch_Iterator;
+    Lbl, Stub      : ISch_GraphicalObject;
+    Port           : ISch_Port;
+    Rect           : IDispatch;
+    PX, FX, Y      : Integer;
+    W, X0, Far     : Integer;
+    What           : String;
+begin
+    Stub := nil;
+    Iter := EdDoc.SchIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(eNetLabel));
+    Lbl := Iter.FirstSchObject;
+    while (Lbl <> nil) and (Stub = nil) do
+    begin
+        if EdOwnedBySheet(Lbl) and (Lbl.Text = Net) then
+        begin
+            Stub := EdLabelStub(Lbl, PX, FX, Y);
+            if (Stub <> nil) then
+                if ((Side = 'left') and (FX > PX)) or ((Side = 'right') and (FX < PX)) then Stub := nil;
+        end;
+        if (Stub = nil) then Lbl := Iter.NextSchObject;
+    end;
+    EdDoc.SchIterator_Destroy(Iter);
+    if (Stub = nil) then
+    begin
+        EdError(Line, 'no stub carrying a label of ' + Net + ' with its free end pointing ' + Side);
+        Exit;
+    end;
+    Rect := Lbl.BoundingRectangle;
+    W := ((CoordToMils(Rect.Right) - CoordToMils(Rect.Left) + 100 + 49) div 50) * 50;
+    if (Side = 'right') then
+    begin
+        X0 := FX;
+        Far := FX + W;
+    end
+    else
+    begin
+        X0 := FX - W;
+        Far := X0;
+    end;
+    What := EdTouchAt(Far, Y, nil, nil, True);
+    if (What <> '') then
+    begin
+        EdError(Line, 'its far end at (' + IntToStr(Far) + ', ' + IntToStr(Y) + ') would meet ' + What);
+        Exit;
+    end;
+    Port := SchServer.SchObjectFactory(ePort, eCreate_GlobalCopy);
+    Port.Name := Net;
+    Port.IOType := IO;
+    Port.Style := ePortLeftRight;
+    Port.Location := Point(MilsToCoord(X0), MilsToCoord(Y));
+    Port.AutoSize := False;                       // the planned width: its near end on the stub's free end
+    Port.Width := MilsToCoord(W);
+    EdRegister(Port);
 end;
 
 // Remove what names or feeds a pin's hot end: a port, a label, a NoERC marker there, and a two-point wire whose
@@ -1740,6 +1818,9 @@ begin
             EdPort(StrToInt(GetFieldFromPipeString(Rec, 1)), StrToInt(GetFieldFromPipeString(Rec, 2)),
                    StrToInt(GetFieldFromPipeString(Rec, 3)), StrToInt(GetFieldFromPipeString(Rec, 4)),
                    GetFieldFromPipeString(Rec, 5) = '1', GetFieldFromPipeString(Rec, 6))
+        else if (Kind = 'SHEETPORT') then
+            EdSheetPort(GetFieldFromPipeString(Rec, 1), StrToInt(GetFieldFromPipeString(Rec, 2)),
+                        GetFieldFromPipeString(Rec, 3), Rec)
         else if (Kind = 'GEOMETRY') then
             EdGeom := EdGeometry(0)
         else if (Kind = 'SAVE') then

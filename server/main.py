@@ -2871,22 +2871,25 @@ async def _spec_command(command: str, spec_file: str, lines: list) -> str:
 async def _edit_command(sheet: str, ops: list, power_nets: list, save: bool, ctx: Context = None) -> str:
     """edit_schematic in two passes when it connects pins or draws: the ops run and Altium reports the pins to
     connect and the sheet (pass 1, nothing saved), sheet_plan resolves the wire, junction and port ops and places
-    each connection where it touches nothing, pass 2 draws it all and saves."""
+    each connection where it touches nothing, pass 2 draws it all, then the sheet ports on the drawn label stubs, and
+    saves."""
     try:
         lines = schematic_edit.edit_spec(sheet, ops, power_nets, save=False)
         draws = schematic_edit.draw_ops(ops)
+        ports = schematic_edit.sheet_port_lines(ops)
     except ValueError as e:
         return json.dumps({"success": False, "error": str(e)})
     path = lines[0].split("|", 1)[1]
     power = schematic_edit.power_table(list(power_nets or []) + [d["net"] for d in draws if d["op"] == "port"])
-    connects = bool(draws) or any(line.split("|", 1)[0] in schematic_edit.CONNECTIONS for line in lines)
+    connects = bool(draws or ports) or any(line.split("|", 1)[0] in schematic_edit.CONNECTIONS for line in lines)
     first = await _bridge_spec("edit_schematic", EDIT_SPEC_FILE,
                                lines + (["GEOMETRY"] if connects else ["SAVE"] if save else []), ctx)
     geometry, pending = first.pop("geometry", None), first.pop("pending", [])
     errors = first.setdefault("errors", [])
     if connects and geometry is not None:
         objects = sheet_plan.plan(geometry, pending, power, draws)
-        second = await _bridge_spec("edit_schematic", EDIT_SPEC_FILE, sheet_plan.draw_spec(path, objects, save), ctx)
+        second = await _bridge_spec("edit_schematic", EDIT_SPEC_FILE,
+                                    sheet_plan.draw_spec(path, objects, False) + ports + (["SAVE"] if save else []), ctx)
         first["saved"] = second.get("saved", "")
         errors += objects["errors"] + second.get("errors", [])
         if "error" in second:
@@ -3010,6 +3013,12 @@ async def edit_schematic(ctx: Context, sheet: str, ops: list, power_nets: list =
             {"op": "junction", "at": P}
             {"op": "port", "net", "at": P, "orient": 0-3, "style"}   a power port at a chosen point, its own
                                                          orientation (style and shown name from the net)
+            {"op": "sheet_port", "net", "io": "in"|"out"|"bidi"|"unspecified", "side": "left"|"right"}
+                                                         a child sheet's port, drawn last: on the free end of the
+                                                         first stub carrying a label of net whose free end points
+                                                         side, running on that way, as wide as its name plus 100
+                                                         mil; io seen from the sheet. One per net; refused,
+                                                         naming it, where its far end would meet anything
         power_nets: nets drawn as power ports (GND, 3V3 and 5V always are; GND power ground pointing down with its
             name hidden, a supply a bar pointing up).
         save: save the sheet afterwards (default true).
