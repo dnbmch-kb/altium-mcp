@@ -5,7 +5,10 @@ its dev sandbox and the runner outside this repo (c:/Projects/tools/altium/altiu
 c:/Projects/tools/altium/altium_lock.py, the same protocol) each hold this lock from a
 RunScript until its output arrives: the file C:/Users/Public/altium_mcp/altium_script.lock, created exclusively,
 holding the holder's pid, what it runs and since when. A holder whose process has exited left a stale file, which
-the next taker removes. Kept here as well so the server stays self-contained.
+the next taker removes. A run of several scripts holds Altium whole (altium_lock.run_hold, board_build.py): the
+file altium_run.hold beside the lock carries the run's pid and a token its child processes inherit in ALTIUM_RUN_HOLD;
+while that run lives, a taker without the token meets the hold as the holder. Kept here as well so the server stays
+self-contained.
 """
 import ctypes
 import json
@@ -15,6 +18,8 @@ from pathlib import Path
 
 LOCK = Path("C:/Users/Public/altium_mcp/altium_script.lock")
 UNWRITTEN_GRACE = 10       # seconds an unreadable lock file may be in the middle of being written
+HOLD = LOCK.with_name("altium_run.hold")
+HOLD_ENV = "ALTIUM_RUN_HOLD"     # the hold's token, inherited by the holding run's children
 
 
 def describe(holder):
@@ -33,9 +38,34 @@ def alive(pid):
     return code.value == 259                         # STILL_ACTIVE
 
 
+def hold_holder():
+    """The live run hold of another run, None when there is none or this process carries its token; a stale hold
+    (its process gone) is removed."""
+    try:
+        rec = json.loads(HOLD.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        try:
+            if time.time() - HOLD.stat().st_mtime < UNWRITTEN_GRACE:
+                return {"owner": "a run writing its hold"}
+        except FileNotFoundError:
+            return None
+        rec = {"pid": 0}
+    if rec.get("token") and rec["token"] == os.environ.get(HOLD_ENV):
+        return None
+    if alive(rec.get("pid", 0)):
+        return dict(rec, owner=f"a run's hold: {rec.get('owner', '?')}")
+    HOLD.unlink(missing_ok=True)
+    return None
+
+
 def try_take(owner):
-    """Take the lock: None when taken, else the live holder's record."""
+    """Take the lock: None when taken, else the live holder's record - the lock's, or a run hold's this process
+    does not carry."""
     LOCK.parent.mkdir(parents=True, exist_ok=True)
+    if (hold := hold_holder()) is not None:
+        return hold
     while True:
         try:
             with open(LOCK, "x", encoding="utf-8") as f:

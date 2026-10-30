@@ -7,6 +7,7 @@ Run from server/:  python -m unittest tests.test_mailbox -v
 import asyncio
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -229,9 +230,11 @@ class ExecuteCommandTest(Fixture):
 
     def setUp(self):
         super().setUp()
-        self.saved = (main.EXCHANGE_DIR, script_lock.LOCK, main.altium_bridge.run_altium_script)
+        self.saved = (main.EXCHANGE_DIR, script_lock.LOCK, script_lock.HOLD, main.altium_bridge.run_altium_script)
         main.EXCHANGE_DIR = self.root
-        script_lock.LOCK = self.lock
+        script_lock.LOCK, script_lock.HOLD = self.lock, self.root / "altium_run.hold"
+        self.env = dict(os.environ)
+        os.environ.pop(script_lock.HOLD_ENV, None)
         self.owners = []
 
         async def altium():                    # RunScript: Altium serves the queue a moment later
@@ -241,8 +244,31 @@ class ExecuteCommandTest(Fixture):
         main.altium_bridge.run_altium_script = altium
 
     def tearDown(self):
-        main.EXCHANGE_DIR, script_lock.LOCK, main.altium_bridge.run_altium_script = self.saved
+        main.EXCHANGE_DIR, script_lock.LOCK, script_lock.HOLD, main.altium_bridge.run_altium_script = self.saved
+        os.environ.clear()
+        os.environ.update(self.env)
         super().tearDown()
+
+    def test_a_live_run_hold_keeps_the_lock_from_every_taker_without_its_token(self):
+        # board_build holds Altium for a run (tools/altium/altium_lock.py run_hold): this server meets the hold as the
+        # holder, the dev/call_tool.py the run starts carries its token and takes the lock; a dead run's hold goes
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        try:
+            script_lock.HOLD.write_text(json.dumps(dict(pid=child.pid, owner="board_build CTRL", since=0, token="t")),
+                                        encoding="utf-8")
+            holder = script_lock.try_take("altium-mcp get_all_nets (mailbox)")
+            self.assertIn("a run's hold: board_build CTRL", script_lock.describe(holder))
+            self.assertFalse(self.lock.exists())
+            os.environ[script_lock.HOLD_ENV] = "t"
+            self.assertIsNone(script_lock.try_take("altium-mcp edit_schematic (dev)"))
+            script_lock.release()
+            del os.environ[script_lock.HOLD_ENV]
+        finally:
+            child.kill()
+            child.wait()
+        self.assertIsNone(script_lock.try_take("altium-mcp get_all_nets (mailbox)"))
+        script_lock.release()
+        self.assertFalse(script_lock.HOLD.exists())
 
     def test_a_call_holds_the_lock_as_a_mailbox_caller_and_gets_its_own_answer(self):
         r = asyncio.run(main.altium_bridge.execute_command("get_all_nets", {"x": 1},
