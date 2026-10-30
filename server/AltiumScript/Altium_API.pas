@@ -2,9 +2,10 @@
 // The bridge between the MCP servers and Altium. A server queues a request in the mailbox under
 // C:\Users\Public\altium_mcp\ (server/mailbox.py has the layout) and runs Run; Run takes the queued requests of the
 // server holding the one-script lock, each from its own folder mail\<id>\, reports progress to that folder's
-// progress.log and answers into its response.json with the request's id. A server started before the mailbox writes
-// request.json at the root instead and waits for response.json there; Run still answers that while such a server
-// holds the lock (ServeLegacy).
+// progress.log and answers into its response.json with the request's id, once the libraries the request opened and
+// then the bridge's own script project are closed. A server started before the mailbox writes request.json at the
+// root instead and waits for response.json there; Run still answers that while such a server holds the lock
+// (ServeLegacy).
 
 const
     constScriptProjectName = 'Altium_API'; // Define the script project name
@@ -20,6 +21,7 @@ var
     RESPONSE_FILE : String;
     ROOT_DIR: String;          // the request's folder: its spec files are read and its temporary files written there
     REQUEST_ID : String;       // '' for a single-file request
+    Answered : TStringList;    // the folders of the mailbox requests this run answered; Run renames each answer last
 
 // The pid of the lock's holder ('' when nobody holds it); Legacy is set when the holder is an altium-mcp server
 // that speaks the single-file protocol (its lock owner names no mailbox).
@@ -1304,13 +1306,14 @@ begin
             AddJSONProperty(ResultProps, 'error', ActualErrorMsg);
         end;
         
-        // Build response: a mailbox answer appears whole, renamed into place, so the server never reads half of it
+        // Build response: a mailbox answer appears whole, renamed into place by Run once the bridge's script project
+        // is closed, so the server never reads half of it and holds the lock until the bridge is done
         ResponseData.Text := BuildJSONObject(ResultProps);
         if (REQUEST_ID <> '') then
         begin
             ResponseData.SaveToFile(ROOT_DIR + 'response.tmp');
             BridgeProgress('answered', 0, 0);
-            RenameFile(ROOT_DIR + 'response.tmp', RESPONSE_FILE);
+            Answered.Add(ROOT_DIR);
         end
         else
             ResponseData.SaveToFile(RESPONSE_FILE);
@@ -1320,7 +1323,8 @@ begin
     end;
 end;
 
-// Read REQUEST_FILE, run its command and answer into RESPONSE_FILE
+// Read REQUEST_FILE, run its command and answer into RESPONSE_FILE. The libraries the command opened are closed before
+// the answer, a failed command's too (OpenLibraryDocument, CloseOpenedLibraries).
 procedure HandleRequest;
 var
     CommandType: String;
@@ -1336,6 +1340,7 @@ begin
         Exit;
     end;
 
+    OpenedLibraries := TStringList.Create;
     try
         // Initialize parameters list
         Params := TStringList.Create;
@@ -1372,6 +1377,7 @@ begin
             if CommandType <> '' then
             begin
                 Result := ExecuteCommand(CommandType);
+                CloseOpenedLibraries;
 
                 if Result <> '' then
                 begin
@@ -1394,9 +1400,11 @@ begin
         end;
     except
         // Simple exception handling without the specific exception type
+        CloseOpenedLibraries;
         WriteResponse(False, '', 'Exception occurred during script execution');
         LogScriptError('Error: Exception occurred during script execution');
     end;
+    OpenedLibraries.Free;
 end;
 
 // One mailbox request, already taken: its folder is mail\<Id>\
@@ -1461,18 +1469,84 @@ begin
     HandleRequest;
 end;
 
-// Main procedure to run the bridge
+// Main procedure to run the bridge. Last, the bridge's script project leaves the operator's workspace (house rule:
+// after a release it holds nothing an agent opened): every copy open under bridge\, this run's own and any an older
+// run left, is closed by its path the way tools/altium/altium_run.py's closer closes a staged project - focused with
+// one of its units shown, then WorkspaceManager:CloseObject - and the document focused before is shown again. A script
+// runs on after its own project closes (#Notes/guides/altium_scripting.md), so from the first close on Run calls only
+// Altium's routines and its own locals, nothing of this project's units: each answered request's folder gets the
+// outcome as closed.txt, then its answer is renamed into place, so its server holds the lock until the bridge is done.
 procedure Run;
 var
-    Holder : String;
-    Legacy : Boolean;
+    Holder  : String;
+    Legacy  : Boolean;
+    Wsp     : IWorkspace;
+    Prj     : IProject;
+    Doc     : IServerDocument;
+    Answers, Copies, Outcome : TStringList;
+    Stage, Focused : String;
+    I       : Integer;
 begin
     REQUEST_ID := '';
     ROOT_DIR := EXCHANGE_ROOT;
     PROGRESS_FILE := '';
     if not DirectoryExists(EXCHANGE_ROOT) then ForceDirectories(EXCHANGE_ROOT);
+    Answered := TStringList.Create;
     Holder := LockHolderPid(Legacy);
     if (ServeQueue(Holder) = 0) and Legacy then ServeLegacy;
+
+    Answers := Answered;
+    Stage := UpperCase(EXCHANGE_ROOT + 'bridge\');
+    Wsp := GetWorkspace;
+    Focused := '';
+    if (Wsp.DM_FocusedDocument <> nil) then Focused := Wsp.DM_FocusedDocument.DM_FullPath;
+    Copies := TStringList.Create;
+    Outcome := TStringList.Create;
+    for I := 0 to Wsp.DM_ProjectCount - 1 do
+        if (Pos(Stage, UpperCase(Wsp.DM_Projects(I).DM_ProjectFullPath)) = 1) then
+            Copies.Add(Wsp.DM_Projects(I).DM_ProjectFullPath);
+    for I := 0 to Copies.Count - 1 do
+    begin
+        Prj := Wsp.DM_GetProjectFromPath(Copies[I]);
+        if (Prj <> nil) then
+        begin
+            Prj.DM_SetAsCurrentProject;
+            if (Prj.DM_LogicalDocumentCount > 0) then
+            begin
+                Doc := Client.OpenDocument(Prj.DM_LogicalDocuments(0).DM_DocumentKind,
+                                           Prj.DM_LogicalDocuments(0).DM_FullPath);
+                if (Doc <> nil) then Client.ShowDocument(Doc);
+            end;
+            if (Wsp.DM_FocusedProject = nil) then
+                Outcome.Add('REFUSED ' + Copies[I] + ': no focused project')
+            else if (UpperCase(Wsp.DM_FocusedProject.DM_ProjectFullPath) <> UpperCase(Copies[I])) then
+                Outcome.Add('REFUSED ' + Copies[I] + ': the focused project is ' +
+                            Wsp.DM_FocusedProject.DM_ProjectFullPath)
+            else
+            begin
+                ResetParameters;
+                AddStringParameter('ObjectKind', 'Project');
+                RunProcess('WorkspaceManager:CloseObject');
+                if (Wsp.DM_GetProjectFromPath(Copies[I]) = nil) then
+                    Outcome.Add('CLOSED ' + Copies[I])
+                else
+                    Outcome.Add('STILL OPEN ' + Copies[I]);
+            end;
+        end;
+    end;
+    if (Focused <> '') then
+    begin
+        Doc := Client.GetDocumentByPath(Focused);
+        if (Doc <> nil) then Client.ShowDocument(Doc);
+    end;
+    for I := 0 to Answers.Count - 1 do
+    begin
+        Outcome.SaveToFile(Answers[I] + 'closed.txt');
+        RenameFile(Answers[I] + 'response.tmp', Answers[I] + 'response.json');
+    end;
+    Answers.Free;
+    Copies.Free;
+    Outcome.Free;
 end;
 
 
