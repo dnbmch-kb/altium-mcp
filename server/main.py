@@ -2873,22 +2873,25 @@ async def _spec_command(command: str, spec_file: str, lines: list) -> str:
 async def _edit_command(sheet: str, ops: list, power_nets: list, save: bool, ctx: Context = None) -> str:
     """edit_schematic in two passes when it connects pins or draws: the ops run and Altium reports the pins to
     connect and the sheet (pass 1, nothing saved), sheet_plan resolves the wire, junction and port ops and places
-    each connection where it touches nothing, pass 2 draws it all and saves."""
+    each connection where it touches nothing, pass 2 draws it all, then the sheet ports on the drawn label stubs, and
+    saves."""
     try:
         lines = schematic_edit.edit_spec(sheet, ops, power_nets, save=False)
         draws = schematic_edit.draw_ops(ops)
+        ports = schematic_edit.sheet_port_lines(ops)
     except ValueError as e:
         return json.dumps({"success": False, "error": str(e)})
     path = lines[0].split("|", 1)[1]
     power = schematic_edit.power_table(list(power_nets or []) + [d["net"] for d in draws if d["op"] == "port"])
-    connects = bool(draws) or any(line.split("|", 1)[0] in schematic_edit.CONNECTIONS for line in lines)
+    connects = bool(draws or ports) or any(line.split("|", 1)[0] in schematic_edit.CONNECTIONS for line in lines)
     first = await _bridge_spec("edit_schematic", EDIT_SPEC_FILE,
                                lines + (["GEOMETRY"] if connects else ["SAVE"] if save else []), ctx)
     geometry, pending = first.pop("geometry", None), first.pop("pending", [])
     errors = first.setdefault("errors", [])
     if connects and geometry is not None:
         objects = sheet_plan.plan(geometry, pending, power, draws)
-        second = await _bridge_spec("edit_schematic", EDIT_SPEC_FILE, sheet_plan.draw_spec(path, objects, save), ctx)
+        second = await _bridge_spec("edit_schematic", EDIT_SPEC_FILE,
+                                    sheet_plan.draw_spec(path, objects, False) + ports + (["SAVE"] if save else []), ctx)
         first["saved"] = second.get("saved", "")
         errors += objects["errors"] + second.get("errors", [])
         if "error" in second:
@@ -2941,7 +2944,9 @@ async def edit_schematic(ctx: Context, sheet: str, ops: list, power_nets: list =
     (c:/Projects/tools/altium/sch_nets.py), not with the result alone. Every .SchLib the call opens to copy a
     symbol from is closed again at its end, saving nothing, a failed op's too; one open before the call stays open.
 
-    Components are referenced as "uid:<UNIQUEID>" (read from the file) or "des:<designator>".
+    Components are referenced as "uid:<UNIQUEID>" (read from the file) or "des:<designator>". A designator names
+    every record of a multi-part part: relink changes each record, attach_pin, detach_pin and no_erc_pins act on
+    each record that shows the pin, and replace refuses one naming more than one record (replace each part by uid).
 
     Args:
         sheet: full path of the .SchDoc (opened if it is not).
@@ -2949,18 +2954,24 @@ async def edit_schematic(ctx: Context, sheet: str, ops: list, power_nets: list =
             {"op": "delete", "uid"}                      any sheet object by unique id
             {"op": "delete_component", "uid", "dead_ends": true, "keep": [uid...]}
                                                          a part, and with dead_ends the wires left connecting
-                                                         nothing plus the labels and ports on them
+                                                         nothing plus the labels and ports on them, mid-stub too,
+                                                         unless another wire or a pin is under one
             {"op": "rename_label", "uid", "text"}        {"op": "rename_net", "old", "new"} (every label)
+                                                         a renamed label's stub (one straight wire, one end free)
+                                                         is redrawn as long as the new text, on the 50 mil grid; a
+                                                         label at the free end moves with it. Refused, the old text
+                                                         kept, where the stub would meet anything
             {"op": "port_rename", "uid", "new"}          {"op": "label_to_port", "uid", "text"}
             {"op": "attach_pin", "comp", "pin", "net"}   stub + label or port on a pin
-            {"op": "detach_pin", "comp", "pin"}          removes the port, label or stub at a pin; a wire that
-                                                         also serves something else is refused
-            {"op": "no_erc_pins", "comp", "pins": [..]}
+            {"op": "detach_pin", "comp", "pin"}          removes the port, label or stub at a pin and every
+                                                         label or port on that stub; a wire that also serves
+                                                         something else is refused
+            {"op": "no_erc_pins", "comp", "pins": [..]}  a pin end with a marker keeps that one, no second
             {"op": "attach_entry", "symbol", "entry", "net"}   a sheet symbol's entry
             {"op": "place", "designator", "symbol_library", "lib_ref", "x", "y", "orient", "mirror",
              "link_library", "db_table", "design_item", "footprint", "alternate_footprints": [..],
              "footprint_library", "comment", "description", "parameters": {}, "pins": {pin: net}, "no_erc": [pin],
-             "part"}
+             "part", "comment_at": [dx, dy]}
                                                          symbol copied from a .SchLib; link_library (e.g.
                                                          "dnbm.IntLib" or "Res-Gen.DbLib") is what it links to;
                                                          part (1 = A, 2 = B, ...) places one part of a multi-part
@@ -2977,11 +2988,20 @@ async def edit_schematic(ctx: Context, sheet: str, ops: list, power_nets: list =
                                                          The part's footprint models become exactly footprint
                                                          (current) and alternate_footprints (a DbLib row's
                                                          Footprint Ref 2 onward); without footprint it has none
-                                                         but what its symbol carries
+                                                         but what its symbol carries. comment_at puts the comment's
+                                                         bottom right corner on the part's origin plus (dx, dy)
+                                                         mils, right-aligned and unrotated, before the connections
+                                                         are planned, so they keep clear of it
             {"op": "replace", "comp", "symbol_library", "lib_ref", "pin_map": {old: new},
              "nets": {new_pin: net}, place's link fields, "description", "parameters": {}}
                                                          every mapped new pin needs its net: the old pin's end
-                                                         gets the same net, so the old wiring keeps it
+                                                         gets the same net, so the old wiring keeps it. The new
+                                                         part takes the old origin, never moved; refused, nothing
+                                                         changed, when a pin the op names is not on the new
+                                                         symbol, its body overlaps another part's, or a pin end
+                                                         lands on anything but the old end of the pin mapped onto
+                                                         it. An old pin connected but in no pin_map entry is an
+                                                         error naming it: its wiring is left without a pin
             {"op": "relink", "comp", "link_library", "db_table", "design_item", "footprint",
              "alternate_footprints", "footprint_library", "comment", "description", "parameters": {}}
                                                          changes a part's library link and keeps its symbol: a
@@ -2995,6 +3015,12 @@ async def edit_schematic(ctx: Context, sheet: str, ops: list, power_nets: list =
             {"op": "junction", "at": P}
             {"op": "port", "net", "at": P, "orient": 0-3, "style"}   a power port at a chosen point, its own
                                                          orientation (style and shown name from the net)
+            {"op": "sheet_port", "net", "io": "in"|"out"|"bidi"|"unspecified", "side": "left"|"right"}
+                                                         a child sheet's port, drawn last: on the free end of the
+                                                         first stub carrying a label of net whose free end points
+                                                         side, running on that way, as wide as its name plus 100
+                                                         mil; io seen from the sheet. One per net; refused,
+                                                         naming it, where its far end would meet anything
         power_nets: nets drawn as power ports (GND, 3V3 and 5V always are; GND power ground pointing down with its
             name hidden, a supply a bar pointing up).
         save: save the sheet afterwards (default true).
@@ -3002,8 +3028,10 @@ async def edit_schematic(ctx: Context, sheet: str, ops: list, power_nets: list =
     Returns:
         str: JSON with success, sheet, saved, ops, errors [..], placed [{designator, uid, x, y,
              pins [[pin, x, y]], unassigned_pins, library, design_item, models [{type, name, current,
-             use_component_library, library_path}]}], connections [{designator, pins, net, kind,
-             boxes [[l, b, r, t]]}], overlaps [..]. A part linked to an IntLib or DbLib takes every model from that
+             use_component_library, library_path}]}], removed [{uid, kind, text}] (every object the call took
+             off the sheet: component, wire, label, power_port, port, no_erc, junction), connections
+             [{designator, pins, net, kind, boxes [[l, b, r, t]]}], overlaps [..]. A part linked to an IntLib or
+             DbLib takes every model from that
              library ("Use Component Library", as a hand-placed part does) but the footprint given a
              footprint_library; a model on library Any (neither) is an error.
     """
@@ -3019,9 +3047,12 @@ async def replace_component(ctx: Context, sheet: str, comp: str, symbol_library:
     """
     Swap a placed part for another symbol and keep its connections, mapping pins by FUNCTION.
 
-    The old pin ends get net labels carrying each pin's net, the old part goes, the new one takes its place
-    (stepped right until no pin lands on existing wiring) and every new pin gets a stub with its net. Map by
-    function, never by number: two diode symbols can number the cathode differently.
+    The old pin ends get net labels carrying each pin's net, the old part goes, the new one takes its origin,
+    never moved, and every new pin gets a stub with its net. Refused, nothing changed, when the new part does not
+    fit there: a pin the call names missing on the new symbol, its body over another part's, a pin end on
+    anything but the old end of the pin mapped onto it. An old pin connected but in no pin_map entry is an error
+    naming it, its wiring left without a pin. Map by function, never by number: two diode symbols can number the
+    cathode differently.
 
     Args:
         sheet: full path of the .SchDoc.

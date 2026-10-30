@@ -13,6 +13,8 @@ SUPPLY_STYLE = (2, 1, True)
 GROUND_STYLE = (4, 3, True)                                    # another ground net keeps its name
 DRAW_OPS = ("wire", "junction", "port")                        # drawn in the second pass, from the reported pins
 CONNECTIONS = ("PIN", "MAP", "ATTACH")                         # spec lines whose connection sheet_plan places
+# a sheet port's I/O type as Altium numbers it (TPortIO), seen from the sheet
+PORT_IO = {"unspecified": 0, "out": 1, "in": 2, "bidi": 3}
 
 _REQUIRED = {
     "delete": ("uid",),
@@ -31,6 +33,7 @@ _REQUIRED = {
     "wire": ("points",),
     "junction": ("at",),
     "port": ("net", "at", "orient"),
+    "sheet_port": ("net", "io", "side"),
 }
 
 
@@ -122,6 +125,30 @@ def draw_ops(ops):
     return out
 
 
+def sheet_port_lines(ops):
+    """The sheet_port ops as SHEETPORT|net|io|side lines, checked, for the end of the second pass: each port goes on
+    the free end of a stub carrying its net's label, the stub's free end pointing side, once the plan has drawn it.
+    edit_spec leaves them out. One port per net."""
+    out, seen = [], set()
+    for i, op in enumerate(ops):
+        if op.get("op") != "sheet_port":
+            continue
+        what = f"op {i} (sheet_port)"
+        for key in _REQUIRED["sheet_port"]:
+            if key not in op:
+                raise ValueError(f"{what}: missing '{key}'")
+        net = _text(op["net"], what + " net")
+        if op["io"] not in PORT_IO:
+            raise ValueError(f"{what}: io is one of {', '.join(PORT_IO)}: {op['io']!r}")
+        if op["side"] not in ("left", "right"):
+            raise ValueError(f"{what}: side is left or right, the way its stub's free end points: {op['side']!r}")
+        if net in seen:
+            raise ValueError(f"{what}: a second sheet port for {net}")
+        seen.add(net)
+        out.append(f"SHEETPORT|{net}|{PORT_IO[op['io']]}|{op['side']}")
+    return out
+
+
 def _footprints(op, what):
     """The footprint field: footprint, then alternate_footprints (a DbLib row's Footprint Ref 2 onward), ';'-joined;
     the part's footprint models become exactly these, the first current."""
@@ -177,6 +204,18 @@ def _description(op, what):
     return desc
 
 
+def _comment_at(op, what):
+    """A place op's comment_at [dx, dy]: the part's comment right-aligned at its bottom right corner on the part's
+    origin plus (dx, dy) mils, unrotated. A block line, so the first pass sets it and the plan meets the comment where
+    it ends."""
+    at = op.get("comment_at")
+    if at is None:
+        return []
+    if not isinstance(at, (list, tuple)) or len(at) != 2:
+        raise ValueError(f"{what}: comment_at is [dx, dy] in mils from the part's origin: {at!r}")
+    return [f"COMMENT_AT|{_int(at[0], what + ' comment_at dx')}|{_int(at[1], what + ' comment_at dy')}"]
+
+
 def _part_block(op, what, power):
     desc = _description(op, what)
     lines = [] if desc is None else [f"DESCRIPTION|{desc}"]
@@ -201,6 +240,7 @@ def edit_spec(sheet, ops, power_nets=None, save=True):
     if not ops:
         raise ValueError("no ops given")
     draw_ops(ops)
+    sheet_port_lines(ops)
     power = power_table(power_nets)
     lines = [f"SHEET|{path}"] + [f"POWERNET|{n}|{s}|{o}|{1 if shown else 0}" for n, (s, o, shown) in power.items()]
     for i, op in enumerate(ops):
@@ -208,7 +248,7 @@ def edit_spec(sheet, ops, power_nets=None, save=True):
         what = f"op {i} ({kind})"
         if kind not in _REQUIRED:
             raise ValueError(f"{what}: unknown op; known: {', '.join(sorted(_REQUIRED))}")
-        if kind in DRAW_OPS:
+        if kind in DRAW_OPS or kind == "sheet_port":
             continue
         for key in _REQUIRED[kind]:
             if key not in op:
@@ -253,7 +293,7 @@ def edit_spec(sheet, ops, power_nets=None, save=True):
             if footprint_library:
                 line += f"|{footprint_library}"
             lines.append(line)
-            lines += _part_block(op, what, power) + ["END"]
+            lines += _part_block(op, what, power) + _comment_at(op, what) + ["END"]
         elif kind == "replace":
             footprint_library = _footprint_library(op, what)
             lines.append("REPLACE|{}|{}|{}|{}|{}|{}".format(

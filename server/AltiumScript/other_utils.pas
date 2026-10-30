@@ -156,6 +156,8 @@ end;
 // Return the Index-th (0-based) field of a pipe-delimited string,
 // e.g. GetFieldFromPipeString('R1|100|200', 1) = '100'.
 // Returns '' if the field does not exist.
+// The bridge's own helper, not an Altium built-in: a script run outside the bridge (the sandbox, a target script)
+// finds it undeclared and copies it in.
 function GetFieldFromPipeString(S: String; Index: Integer): String;
 var
     i, FieldStart, FieldIndex: Integer;

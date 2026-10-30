@@ -6,7 +6,7 @@
 // reported in "errors" and changes nothing; the rest of the spec still runs. A pin's new connection (PIN, MAP,
 // ATTACH) is not drawn here: it is reported in "pending", GEOMETRY reports the sheet's parts and connection
 // objects, server/sheet_plan.py plans where each connection goes, and a second spec draws the plan with WIRE,
-// JUNCTION, LABEL and PORT lines.
+// JUNCTION, LABEL and PORT lines, then a child sheet's ports on the drawn label stubs with SHEETPORT lines.
 
 const
     ED_STUB = 100;          // mils
@@ -20,6 +20,7 @@ var
     EdPlaced    : TStringList;
     EdPower     : TStringList;    // "NET=style,orient,shown"
     EdPending   : TStringList;    // [part key, "pin", "net", x, y, direction]
+    EdRemoved   : TStringList;    // {uid, kind, text} of every object the call took off the sheet
     EdGeom      : String;
     EdOps       : Integer;
 
@@ -51,10 +52,40 @@ begin
     SchServer.RobotManager.SendMessage(EdDoc.I_ObjectAddress, c_BroadCast, SCHM_PrimitiveRegistration, Obj.I_ObjectAddress);
 end;
 
-procedure EdRemove(Obj: ISch_GraphicalObject);
+// What a sheet object is, for the answer: component, wire, label, power_port, port, no_erc, junction
+function EdKind(Obj: ISch_GraphicalObject): String;
+begin
+    if (Obj.ObjectId = eSchComponent) then Result := 'component'
+    else if (Obj.ObjectId = eWire) then Result := 'wire'
+    else if (Obj.ObjectId = eNetLabel) then Result := 'label'
+    else if (Obj.ObjectId = ePowerObject) then Result := 'power_port'
+    else if (Obj.ObjectId = ePort) then Result := 'port'
+    else if (Obj.ObjectId = eNoERC) then Result := 'no_erc'
+    else if (Obj.ObjectId = eJunction) then Result := 'junction'
+    else Result := 'object ' + IntToStr(Obj.ObjectId);
+end;
+
+// Its name: a component's designator, a label's or power port's text, a port's name; '' for the rest
+function EdName(Obj: ISch_GraphicalObject): String;
+begin
+    Result := '';
+    if (Obj.ObjectId = eSchComponent) then Result := Obj.Designator.Text
+    else if (Obj.ObjectId = eNetLabel) or (Obj.ObjectId = ePowerObject) then Result := Obj.Text
+    else if (Obj.ObjectId = ePort) then Result := Obj.Name;
+end;
+
+// Off the sheet, unreported: an object the call put there itself and takes back
+procedure EdDrop(Obj: ISch_GraphicalObject);
 begin
     EdDoc.RemoveSchObject(Obj);
     SchServer.RobotManager.SendMessage(EdDoc.I_ObjectAddress, c_BroadCast, SCHM_PrimitiveRegistration, Obj.I_ObjectAddress);
+end;
+
+procedure EdRemove(Obj: ISch_GraphicalObject);
+begin
+    EdRemoved.Add('{"uid": "' + JSONEscapeString(Obj.UniqueId) + '", "kind": "' + EdKind(Obj) + '", "text": "' +
+                  JSONEscapeString(EdName(Obj)) + '"}');
+    EdDrop(Obj);
 end;
 
 procedure EdBeginModify(Obj: ISch_GraphicalObject);
@@ -100,25 +131,40 @@ begin
     if (Obj <> nil) then EdRemove(Obj);
 end;
 
-// "uid:XXXX" or "des:R5"
-function EdFindComp(Ref: String): ISch_Component;
+// The N-th record (from 1) "uid:XXXX" or "des:R5" names, nil past the last. A designator names every record of a
+// multi-part part (CTRL's U804_G1, three); a unique id one record
+function EdFindComp(Ref: String; N: Integer): ISch_Component;
 var
     Iter : ISch_Iterator;
     Obj  : ISch_Component;
     Key  : String;
+    Seen : Integer;
 begin
     Result := nil;
+    if (Copy(Ref, 1, 4) = 'uid:') and (N > 1) then Exit;
     Key := Copy(Ref, 5, Length(Ref));
+    Seen := 0;
     Iter := EdDoc.SchIterator_Create;
     Iter.AddFilter_ObjectSet(MkSet(eSchComponent));
     Obj := Iter.FirstSchObject;
     while (Obj <> nil) and (Result = nil) do
     begin
-        if (Copy(Ref, 1, 4) = 'uid:') and (Obj.UniqueId = Key) then Result := Obj;
-        if (Copy(Ref, 1, 4) = 'des:') and (Obj.Designator.Text = Key) then Result := Obj;
+        if ((Copy(Ref, 1, 4) = 'uid:') and (Obj.UniqueId = Key)) or
+           ((Copy(Ref, 1, 4) = 'des:') and (Obj.Designator.Text = Key)) then
+        begin
+            Seen := Seen + 1;
+            if (Seen = N) then Result := Obj;
+        end;
         Obj := Iter.NextSchObject;
     end;
     EdDoc.SchIterator_Destroy(Iter);
+end;
+
+// How many records Ref names
+function EdCompCount(Ref: String): Integer;
+begin
+    Result := 0;
+    while (EdFindComp(Ref, Result + 1) <> nil) do Result := Result + 1;
 end;
 
 function EdFindPin(Comp: ISch_Component; Des: String): ISch_Pin;
@@ -166,27 +212,33 @@ begin
                        CoordToMils(W.Vertex[k + 1].X), CoordToMils(W.Vertex[k + 1].Y)) then Result := True;
 end;
 
-// Something at (X, Y) other than Skip: a wire through or ending there, a pin hot end, and with Names a port or label
-function EdTouchAt(X, Y: Integer; Skip: ISch_GraphicalObject; Names: Boolean): Boolean;
+// What lies at (X, Y) other than Skip and Skip2 (either may be nil), '' for nothing: a wire through or ending there,
+// a pin hot end, and with Names a port or label
+function EdTouchAt(X, Y: Integer; Skip, Skip2: ISch_GraphicalObject; Names: Boolean): String;
 var
-    Iter, PinIter : ISch_Iterator;
-    Obj, Pin      : ISch_GraphicalObject;
-    PX, PY, PD    : Integer;
-    SkipAddr      : Integer;
+    Iter, PinIter       : ISch_Iterator;
+    Obj, Pin            : ISch_GraphicalObject;
+    PX, PY, PD          : Integer;
+    SkipAddr, Skip2Addr : Integer;
 begin
-    Result := False;
+    Result := '';
     // Identity by object address: DelphiScript's <> on two interface references to one
     // object is not reliable, and a part then collides with its own pins.
     SkipAddr := 0;
     if (Skip <> nil) then SkipAddr := Skip.I_ObjectAddress;
+    Skip2Addr := 0;
+    if (Skip2 <> nil) then Skip2Addr := Skip2.I_ObjectAddress;
     Iter := EdDoc.SchIterator_Create;
     Iter.AddFilter_ObjectSet(MkSet(eWire, eNetLabel, ePowerObject, ePort, eSchComponent));
     Obj := Iter.FirstSchObject;
-    while (Obj <> nil) and (not Result) do
+    while (Obj <> nil) and (Result = '') do
     begin
-        if (Obj.I_ObjectAddress <> SkipAddr) and EdOwnedBySheet(Obj) then
+        if (Obj.I_ObjectAddress <> SkipAddr) and (Obj.I_ObjectAddress <> Skip2Addr) and EdOwnedBySheet(Obj) then
         begin
-            if (Obj.ObjectId = eWire) then Result := EdWireTouches(Obj, X, Y)
+            if (Obj.ObjectId = eWire) then
+            begin
+                if EdWireTouches(Obj, X, Y) then Result := 'a wire';
+            end
             else if (Obj.ObjectId = eSchComponent) then
             begin
                 PinIter := Obj.SchIterator_Create;
@@ -194,15 +246,16 @@ begin
                 PinIter.AddFilter_CurrentPartPrimitives;
                 PinIter.AddFilter_CurrentDisplayModePrimitives;
                 Pin := PinIter.FirstSchObject;
-                while (Pin <> nil) and (not Result) do
+                while (Pin <> nil) and (Result = '') do
                 begin
                     EdPinEnd(Pin, PX, PY, PD);
-                    if (PX = X) and (PY = Y) then Result := True;
+                    if (PX = X) and (PY = Y) then Result := 'pin ' + Obj.Designator.Text + '.' + Pin.Designator;
                     Pin := PinIter.NextSchObject;
                 end;
                 Obj.SchIterator_Destroy(PinIter);
             end
-            else if Names and (CoordToMils(Obj.Location.X) = X) and (CoordToMils(Obj.Location.Y) = Y) then Result := True;
+            else if Names and (CoordToMils(Obj.Location.X) = X) and (CoordToMils(Obj.Location.Y) = Y) then
+                Result := EdKind(Obj) + ' ' + EdName(Obj);
         end;
         Obj := Iter.NextSchObject;
     end;
@@ -211,13 +264,13 @@ end;
 
 function EdSomethingAt(X, Y: Integer; Skip: ISch_GraphicalObject): Boolean;
 begin
-    Result := EdTouchAt(X, Y, Skip, True);
+    Result := (EdTouchAt(X, Y, Skip, nil, True) <> '');
 end;
 
 // A wire or a pin at (X, Y): what keeps a net alive, unlike a bare label or port
 function EdLiveAt(X, Y: Integer; Skip: ISch_GraphicalObject): Boolean;
 begin
-    Result := EdTouchAt(X, Y, Skip, False);
+    Result := (EdTouchAt(X, Y, Skip, nil, False) <> '');
 end;
 
 // A power net's port: style, orientation and whether its name shows ("NET=style,orient,shown")
@@ -338,17 +391,12 @@ begin
               IntToStr(T.Orientation) + ', ' + IntToStr(T.Justification) + ', "' + JSONEscapeString(Text) + '"]';
 end;
 
-// One part for the plan: {key, designator, body [l, b, r, t] of its drawn primitives (pins excluded), pins
-// [[pin, x, y, direction, body-end x, body-end y]], texts (designator and visible parameters)}
-function EdPartGeometry(Comp: ISch_Component): String;
+// A part's body: the extent of its drawn primitives (pins excluded) in mils; L > R when it draws none
+procedure EdBody(Comp: ISch_Component; var L: Integer; var B: Integer; var R: Integer; var T: Integer);
 var
-    Iter          : ISch_Iterator;
-    Prim          : ISch_GraphicalObject;
-    Rect          : IDispatch;
-    L, B, R, T    : Integer;
-    X, Y, D       : Integer;
-    Pins, Texts   : String;
-    Body, S       : String;
+    Iter : ISch_Iterator;
+    Prim : ISch_GraphicalObject;
+    Rect : IDispatch;
 begin
     L := 999999; B := 999999; R := -999999; T := -999999;
     Iter := Comp.SchIterator_Create;
@@ -366,6 +414,20 @@ begin
         Prim := Iter.NextSchObject;
     end;
     Comp.SchIterator_Destroy(Iter);
+end;
+
+// One part for the plan: {key, designator, body [l, b, r, t] of its drawn primitives (pins excluded), pins
+// [[pin, x, y, direction, body-end x, body-end y]], texts (designator and visible parameters)}
+function EdPartGeometry(Comp: ISch_Component): String;
+var
+    Iter          : ISch_Iterator;
+    Prim          : ISch_GraphicalObject;
+    L, B, R, T    : Integer;
+    X, Y, D       : Integer;
+    Pins, Texts   : String;
+    Body, S       : String;
+begin
+    EdBody(Comp, L, B, R, T);
     Body := '';
     if (L <= R) then Body := IntToStr(L) + ', ' + IntToStr(B) + ', ' + IntToStr(R) + ', ' + IntToStr(T);
 
@@ -484,10 +546,24 @@ begin
     EdPlaceNetAt(EX, EY, Dir, Net);
 end;
 
+// A No-ERC marker on a pin end, unless one sits there already
 procedure EdNoErc(X, Y: Integer);
 var
-    Obj : ISch_GraphicalObject;
+    Iter : ISch_Iterator;
+    Obj  : ISch_GraphicalObject;
+    Have : Boolean;
 begin
+    Have := False;
+    Iter := EdDoc.SchIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(eNoERC));
+    Obj := Iter.FirstSchObject;
+    while (Obj <> nil) and (not Have) do
+    begin
+        if EdOwnedBySheet(Obj) and (CoordToMils(Obj.Location.X) = X) and (CoordToMils(Obj.Location.Y) = Y) then Have := True;
+        Obj := Iter.NextSchObject;
+    end;
+    EdDoc.SchIterator_Destroy(Iter);
+    if Have then Exit;
     Obj := SchServer.SchObjectFactory(eNoERC, eCreate_GlobalCopy);
     Obj.Location := Point(MilsToCoord(X), MilsToCoord(Y));
     EdRegister(Obj);
@@ -704,16 +780,22 @@ begin
     Comp.SchIterator_Destroy(Iter);
 end;
 
-// Register Comp at (X, Y); step it sideways in 500 mil steps until its pins and stubs touch nothing
-function EdPut(Comp: ISch_Component; X, Y, Orient, Mirror: Integer): Boolean;
-var
-    Step : Integer;
+// Register Comp with its origin at (X, Y)
+procedure EdPutAt(Comp: ISch_Component; X, Y, Orient, Mirror: Integer);
 begin
     Comp.Orientation := Orient;
     EdDoc.RegisterSchObjectInContainer(Comp);
     SchServer.RobotManager.SendMessage(EdDoc.I_ObjectAddress, c_BroadCast, SCHM_PrimitiveRegistration, Comp.I_ObjectAddress);
     if (Mirror = 1) then Comp.Mirror(Comp.Location);
     Comp.MoveByXY(MilsToCoord(X - CoordToMils(Comp.Location.X)), MilsToCoord(Y - CoordToMils(Comp.Location.Y)));
+end;
+
+// Register Comp at (X, Y); step it sideways in 500 mil steps until its pins and stubs touch nothing
+function EdPut(Comp: ISch_Component; X, Y, Orient, Mirror: Integer): Boolean;
+var
+    Step : Integer;
+begin
+    EdPutAt(Comp, X, Y, Orient, Mirror);
     Step := 0;
     while (not EdClearSpot(Comp)) and (Step < 20) do
     begin
@@ -751,8 +833,23 @@ begin
                  '", "models": [' + EdModels(Comp) + ']}');
 end;
 
-// Finish a PLACE / REPLACE / RELINK block: DESCRIPTION, PARAM, PIN and NOPIN lines up to END. DESCRIPTION is the
-// part's own Description, as build_schematic sets it: Altium keeps no parameter of that name.
+// A place op's comment_at: the comment right-aligned at its bottom right corner on the part's origin plus (DX, DY),
+// unrotated, as ugv-pcb's PWRBASE after_place.py sets it on a saved sheet
+procedure EdCommentAt(Comp: ISch_Component; DX, DY: Integer);
+var
+    P : ISch_Parameter;
+begin
+    P := Comp.Comment;
+    EdBeginModify(P);
+    P.Location := Point(MilsToCoord(CoordToMils(Comp.Location.X) + DX), MilsToCoord(CoordToMils(Comp.Location.Y) + DY));
+    P.Justification := eJustify_BottomRight;
+    P.Orientation := eRotate0;
+    EdEndModify(P);
+end;
+
+// Finish a PLACE / REPLACE / RELINK block: DESCRIPTION, PARAM, PIN, NOPIN and COMMENT_AT lines up to END. DESCRIPTION
+// is the part's own Description, as build_schematic sets it: Altium keeps no parameter of that name. COMMENT_AT is
+// set here, in the first pass, so the plan meets the comment where it ends.
 function EdFinishPart(Comp: ISch_Component; Spec: TStringList; var i: Integer; Line: String): Boolean;
 var
     Rec, Kind, Unassigned, Have : String;
@@ -769,6 +866,8 @@ begin
         Kind := GetFieldFromPipeString(Rec, 0);
         if (Kind = 'PARAM') then EdSetParam(Comp, GetFieldFromPipeString(Rec, 1), GetFieldFromPipeString(Rec, 2))
         else if (Kind = 'DESCRIPTION') then Comp.ComponentDescription := GetFieldFromPipeString(Rec, 1)
+        else if (Kind = 'COMMENT_AT') then
+            EdCommentAt(Comp, StrToInt(GetFieldFromPipeString(Rec, 1)), StrToInt(GetFieldFromPipeString(Rec, 2)))
         else if (Kind = 'MAP') then
         begin
             // MAP|old|new|net: the old end was labelled before the swap; stub the new pin with the same net
@@ -857,7 +956,28 @@ begin
     EdDoc.SchIterator_Destroy(Iter);
 end;
 
-// Delete Comp and, with DeadEnds, every wire left connecting nothing, then the labels and ports on them
+// The unique ids of the labels and power ports lying on W, at a vertex or mid-segment (a label on a right pin's
+// stub sits 100 mil out, not at its end), added to Names once each
+procedure EdNamesOnWire(W: ISch_Wire; Names: TStringList);
+var
+    Iter : ISch_Iterator;
+    Obj  : ISch_GraphicalObject;
+begin
+    Iter := EdDoc.SchIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(eNetLabel, ePowerObject));
+    Obj := Iter.FirstSchObject;
+    while (Obj <> nil) do
+    begin
+        if EdOwnedBySheet(Obj) then
+            if EdWireTouches(W, CoordToMils(Obj.Location.X), CoordToMils(Obj.Location.Y)) then
+                if (Names.IndexOf(Obj.UniqueId) < 0) then Names.Add(Obj.UniqueId);
+        Obj := Iter.NextSchObject;
+    end;
+    EdDoc.SchIterator_Destroy(Iter);
+end;
+
+// Delete Comp and, with DeadEnds, every wire left connecting nothing, then the labels and ports those wires carried
+// or that sat on a doomed point, unless a wire or pin is still under them
 procedure EdDeleteComponent(Comp: ISch_Component; DeadEnds: Boolean; Keep: String);
 var
     Points             : TStringList;
@@ -865,7 +985,7 @@ var
     Pin, Obj           : ISch_GraphicalObject;
     X, Y, D, k, n      : Integer;
     Changed, Touch     : Boolean;
-    Doomed             : TStringList;
+    Doomed, Carried    : TStringList;
     W                  : ISch_Wire;
 begin
     Points := TStringList.Create;
@@ -884,6 +1004,7 @@ begin
     EdRemove(Comp);
     if not DeadEnds then begin Points.Free; Exit; end;
 
+    Carried := TStringList.Create;
     Changed := True;
     while Changed do
     begin
@@ -919,12 +1040,13 @@ begin
             W := EdFindUid(Doomed[k]);
             for n := 1 to W.VerticesCount do
                 Points.Add(IntToStr(CoordToMils(W.Vertex[n].X)) + ',' + IntToStr(CoordToMils(W.Vertex[n].Y)));
+            EdNamesOnWire(W, Carried);
             EdRemove(W);
             Changed := True;
         end;
         Doomed.Free;
     end;
-    // labels and ports left on a doomed point with no wire or pin under them
+    // labels and ports a doomed wire carried or left on a doomed point, with no wire or pin under them now
     Doomed := TStringList.Create;
     Iter := EdDoc.SchIterator_Create;
     Iter.AddFilter_ObjectSet(MkSet(eNetLabel, ePowerObject));
@@ -932,13 +1054,15 @@ begin
     while (Obj <> nil) do
     begin
         if EdOwnedBySheet(Obj) and (Pos(Obj.UniqueId, Keep) = 0) then
-            if (Points.IndexOf(IntToStr(CoordToMils(Obj.Location.X)) + ',' + IntToStr(CoordToMils(Obj.Location.Y))) >= 0) then
+            if (Carried.IndexOf(Obj.UniqueId) >= 0) or
+               (Points.IndexOf(IntToStr(CoordToMils(Obj.Location.X)) + ',' + IntToStr(CoordToMils(Obj.Location.Y))) >= 0) then
                 if not EdLiveAt(CoordToMils(Obj.Location.X), CoordToMils(Obj.Location.Y), Obj) then Doomed.Add(Obj.UniqueId);
         Obj := Iter.NextSchObject;
     end;
     EdDoc.SchIterator_Destroy(Iter);
     for k := 0 to Doomed.Count - 1 do EdRemoveUid(Doomed[k]);
     Doomed.Free;
+    Carried.Free;
     Points.Free;
 end;
 
@@ -949,9 +1073,233 @@ begin
     EdEndModify(Obj);
 end;
 
+// What a wire run from (X1, Y1) to (X2, Y2) would join, '' for nothing: a pin end, a wire vertex, a label, port or
+// junction on it, or a wire under its end (X2, Y2); Skip and Skip2 left out
+function EdRunHits(X1, Y1, X2, Y2: Integer; Skip, Skip2: ISch_GraphicalObject): String;
+var
+    Iter, PinIter       : ISch_Iterator;
+    Obj, Pin            : ISch_GraphicalObject;
+    PX, PY, PD, k       : Integer;
+    SkipAddr, Skip2Addr : Integer;
+begin
+    Result := '';
+    SkipAddr := Skip.I_ObjectAddress;
+    Skip2Addr := Skip2.I_ObjectAddress;
+    Iter := EdDoc.SchIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(eWire, eNetLabel, ePowerObject, ePort, eJunction, eSchComponent));
+    Obj := Iter.FirstSchObject;
+    while (Obj <> nil) and (Result = '') do
+    begin
+        if (Obj.I_ObjectAddress <> SkipAddr) and (Obj.I_ObjectAddress <> Skip2Addr) and EdOwnedBySheet(Obj) then
+        begin
+            if (Obj.ObjectId = eWire) then
+            begin
+                if EdWireTouches(Obj, X2, Y2) then Result := 'a wire';
+                for k := 1 to Obj.VerticesCount do
+                    if EdOnSegment(CoordToMils(Obj.Vertex[k].X), CoordToMils(Obj.Vertex[k].Y), X1, Y1, X2, Y2) then
+                        Result := 'a wire';
+            end
+            else if (Obj.ObjectId = eSchComponent) then
+            begin
+                PinIter := Obj.SchIterator_Create;
+                PinIter.AddFilter_ObjectSet(MkSet(ePin));
+                PinIter.AddFilter_CurrentPartPrimitives;
+                PinIter.AddFilter_CurrentDisplayModePrimitives;
+                Pin := PinIter.FirstSchObject;
+                while (Pin <> nil) and (Result = '') do
+                begin
+                    EdPinEnd(Pin, PX, PY, PD);
+                    if EdOnSegment(PX, PY, X1, Y1, X2, Y2) then Result := 'pin ' + Obj.Designator.Text + '.' + Pin.Designator;
+                    Pin := PinIter.NextSchObject;
+                end;
+                Obj.SchIterator_Destroy(PinIter);
+            end
+            else if EdOnSegment(CoordToMils(Obj.Location.X), CoordToMils(Obj.Location.Y), X1, Y1, X2, Y2) then
+                Result := EdKind(Obj) + ' ' + EdName(Obj);
+        end;
+        Obj := Iter.NextSchObject;
+    end;
+    EdDoc.SchIterator_Destroy(Iter);
+end;
+
+// The stub under a horizontal label: the one wire under it, two vertices, horizontal on the line Y, one end on a pin
+// or wire (PX) and the other free (FX); nil when the label sits on anything else
+function EdLabelStub(Lbl: ISch_GraphicalObject; var PX: Integer; var FX: Integer; var Y: Integer): ISch_GraphicalObject;
+var
+    Iter              : ISch_Iterator;
+    W, Stub           : ISch_GraphicalObject;
+    AX, AY, X1, X2, N : Integer;
+    L1, L2            : Boolean;
+begin
+    Result := nil;
+    if (Lbl.Orientation <> 0) then Exit;
+    AX := CoordToMils(Lbl.Location.X);
+    AY := CoordToMils(Lbl.Location.Y);
+    Stub := nil;
+    N := 0;
+    Iter := EdDoc.SchIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(eWire));
+    W := Iter.FirstSchObject;
+    while (W <> nil) do
+    begin
+        if EdOwnedBySheet(W) then
+            if EdWireTouches(W, AX, AY) then
+            begin
+                N := N + 1;
+                Stub := W;
+            end;
+        W := Iter.NextSchObject;
+    end;
+    EdDoc.SchIterator_Destroy(Iter);
+    if (N <> 1) then Exit;
+    if (Stub.VerticesCount <> 2) then Exit;
+    X1 := CoordToMils(Stub.Vertex[1].X);
+    X2 := CoordToMils(Stub.Vertex[2].X);
+    Y := CoordToMils(Stub.Vertex[1].Y);
+    if (CoordToMils(Stub.Vertex[2].Y) <> Y) or (X1 = X2) then Exit;
+    L1 := EdLiveAt(X1, Y, Stub);
+    L2 := EdLiveAt(X2, Y, Stub);
+    if (L1 = L2) then Exit;
+    if L1 then
+    begin
+        PX := X1;
+        FX := X2;
+    end
+    else
+    begin
+        PX := X2;
+        FX := X1;
+    end;
+    Result := Stub;
+end;
+
+// A net label's new text, and its stub (EdLabelStub) redrawn as long as the text (the house rule: a label's stub as
+// long as its text, on the 50 mil grid). A label whose text runs back toward the stub's fixed end moves to its free
+// end, the stub its text's width; one whose text runs on toward the free end from inside the stub keeps its spot, the
+// stub reaching past its text's end. Its width is the text's own extent in Altium. A label on anything else, or
+// hanging off its stub's end (a 100 mil connection stub), keeps its wiring; one whose redrawn stub would meet
+// something keeps its old text, the op refused.
+procedure EdRenameLabel(Lbl: ISch_GraphicalObject; Text: String; Line: String);
+var
+    Stub               : ISch_GraphicalObject;
+    Rect               : IDispatch;
+    OldText, What      : String;
+    AX, Y              : Integer;
+    PX, FX, NF, S, J   : Integer;
+    Len, TW, NL        : Integer;
+    Back               : Boolean;
+begin
+    OldText := Lbl.Text;
+    EdSetText(Lbl, Text);
+    Stub := EdLabelStub(Lbl, PX, FX, Y);
+    if (Stub = nil) then Exit;
+    AX := CoordToMils(Lbl.Location.X);
+    if (FX > PX) then S := 1 else S := -1;
+    Len := Abs(FX - PX);
+
+    J := Lbl.Justification mod 3;                 // 0 left, 1 centre, 2 right: the text runs on from, around or up to its anchor
+    if (J = 1) then Exit;
+    Back := ((J = 0) and (S = -1)) or ((J = 2) and (S = 1));
+    Rect := Lbl.BoundingRectangle;
+    TW := CoordToMils(Rect.Right) - CoordToMils(Rect.Left);
+    if Back then
+        NL := ((TW + 25) div 50) * 50
+    else
+    begin
+        if (AX = FX) then Exit;
+        NL := ((Abs(AX - PX) + TW + 25) div 50) * 50;
+        if (NL < Abs(AX - PX) + 50) then NL := Abs(AX - PX) + 50;
+    end;
+    if (NL < 50) then NL := 50;
+    if (NL = Len) and ((not Back) or (AX = FX)) then Exit;
+    NF := PX + S * NL;
+
+    What := EdRunHits(FX, Y, NF, Y, Stub, Lbl);
+    if (What <> '') then
+    begin
+        EdSetText(Lbl, OldText);
+        EdError(Line, 'its stub redrawn for the new text would meet ' + What + '; the label keeps its old text');
+        Exit;
+    end;
+    if (NL <> Len) then
+    begin
+        EdRemove(Stub);
+        EdWire(PX, Y, NF, Y);
+    end;
+    if Back then
+    begin
+        EdBeginModify(Lbl);
+        Lbl.Location := Point(MilsToCoord(NF), MilsToCoord(Y));
+        EdEndModify(Lbl);
+    end;
+end;
+
+// SHEETPORT|net|io|side, after the plan is drawn: a child sheet's port on the free end of the first stub (EdLabelStub)
+// carrying a label of Net whose free end points Side, running on that way, as wide as its name plus 100 mil on the
+// 50 mil grid (the house rule; the label's measured text gives the name's width), its I/O type IO (0 unspecified,
+// 1 output, 2 input, 3 bidirectional), both arrows as schgen draws them. Refused, naming it, where its far end would
+// meet anything; a port joins at both ends.
+procedure EdSheetPort(Net: String; IO: Integer; Side: String; Line: String);
+var
+    Iter           : ISch_Iterator;
+    Lbl, Stub      : ISch_GraphicalObject;
+    Port           : ISch_Port;
+    Rect           : IDispatch;
+    PX, FX, Y      : Integer;
+    W, X0, FarX    : Integer;
+    What           : String;
+begin
+    Stub := nil;
+    Iter := EdDoc.SchIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(eNetLabel));
+    Lbl := Iter.FirstSchObject;
+    while (Lbl <> nil) and (Stub = nil) do
+    begin
+        if EdOwnedBySheet(Lbl) and (Lbl.Text = Net) then
+        begin
+            Stub := EdLabelStub(Lbl, PX, FX, Y);
+            if (Stub <> nil) then
+                if ((Side = 'left') and (FX > PX)) or ((Side = 'right') and (FX < PX)) then Stub := nil;
+        end;
+        if (Stub = nil) then Lbl := Iter.NextSchObject;
+    end;
+    EdDoc.SchIterator_Destroy(Iter);
+    if (Stub = nil) then
+    begin
+        EdError(Line, 'no stub carrying a label of ' + Net + ' with its free end pointing ' + Side);
+        Exit;
+    end;
+    Rect := Lbl.BoundingRectangle;
+    W := ((CoordToMils(Rect.Right) - CoordToMils(Rect.Left) + 100 + 49) div 50) * 50;
+    if (Side = 'right') then
+    begin
+        X0 := FX;
+        FarX := FX + W;
+    end
+    else
+    begin
+        X0 := FX - W;
+        FarX := X0;
+    end;
+    What := EdTouchAt(FarX, Y, nil, nil, True);
+    if (What <> '') then
+    begin
+        EdError(Line, 'its far end at (' + IntToStr(FarX) + ', ' + IntToStr(Y) + ') would meet ' + What);
+        Exit;
+    end;
+    Port := SchServer.SchObjectFactory(ePort, eCreate_GlobalCopy);
+    Port.Name := Net;
+    Port.IOType := IO;
+    Port.Style := ePortLeftRight;
+    Port.Location := Point(MilsToCoord(X0), MilsToCoord(Y));
+    Port.AutoSize := False;                       // the planned width: its near end on the stub's free end
+    Port.Width := MilsToCoord(W);
+    EdRegister(Port);
+end;
+
 // Remove what names or feeds a pin's hot end: a port, a label, a NoERC marker there, and a two-point wire whose
-// far end carries only a port or label (that port or label goes too). A wire that also serves something else is
-// refused, not cut: the op then changes nothing.
+// far end carries only a port or label (every port or label on it goes too, mid-stub as at its end, unless another
+// wire runs under it). A wire that also serves something else is refused, not cut: the op then changes nothing.
 procedure EdDetach(Comp: ISch_Component; PinDes: String; Line: String);
 var
     Pin                : ISch_Pin;
@@ -1003,8 +1351,11 @@ begin
                             Name := NIter.FirstSchObject;
                             while (Name <> nil) do
                             begin
-                                if EdOwnedBySheet(Name) and (CoordToMils(Name.Location.X) = FX) and
-                                   (CoordToMils(Name.Location.Y) = FY) then Doomed.Add(Name.UniqueId);
+                                // on the stub and on nothing else live: the pin end's own are taken below
+                                if EdOwnedBySheet(Name) then
+                                    if EdWireTouches(Obj, CoordToMils(Name.Location.X), CoordToMils(Name.Location.Y)) then
+                                        if not EdLiveAt(CoordToMils(Name.Location.X), CoordToMils(Name.Location.Y), Obj) then
+                                            if (Doomed.IndexOf(Name.UniqueId) < 0) then Doomed.Add(Name.UniqueId);
                                 Name := NIter.NextSchObject;
                             end;
                             EdDoc.SchIterator_Destroy(NIter);
@@ -1013,7 +1364,7 @@ begin
                 end;
             end
             else if (CoordToMils(Obj.Location.X) = X) and (CoordToMils(Obj.Location.Y) = Y) then
-                Doomed.Add(Obj.UniqueId);
+                if (Doomed.IndexOf(Obj.UniqueId) < 0) then Doomed.Add(Obj.UniqueId);
         end;
         Obj := Iter.NextSchObject;
     end;
@@ -1073,8 +1424,9 @@ begin
     if not Done then EdError(Line, 'no such sheet symbol or entry');
 end;
 
-// Before a part is swapped out: the net its pin carried goes onto the old pin end wherever a wire or pin met it
-procedure EdLabelOldEnd(Old: ISch_Component; OldPin: String; Net: String);
+// Before Old is swapped out for NewComp: the net its pin carried goes onto the old pin end wherever a wire or
+// another part's pin met it
+procedure EdLabelOldEnd(Old, NewComp: ISch_Component; OldPin: String; Net: String);
 var
     Pin     : ISch_Pin;
     X, Y, D : Integer;
@@ -1082,7 +1434,145 @@ begin
     Pin := EdFindPin(Old, OldPin);
     if (Pin = nil) then Exit;
     EdPinEnd(Pin, X, Y, D);
-    if EdLiveAt(X, Y, Old) then EdPlaceNetAt(X, Y, D, Net);
+    if (EdTouchAt(X, Y, Old, NewComp, False) <> '') then EdPlaceNetAt(X, Y, D, Net);
+end;
+
+// Whether the block from line i carries old pin OldPin onto new pin NewPin (a MAP or MAPOLD line); onto any new pin
+// when NewPin is ''
+function EdMapped(Spec: TStringList; i: Integer; OldPin, NewPin: String): Boolean;
+var
+    j : Integer;
+    K : String;
+begin
+    Result := False;
+    j := i + 1;
+    while (j < Spec.Count) and (GetFieldFromPipeString(Spec[j], 0) <> 'END') do
+    begin
+        K := GetFieldFromPipeString(Spec[j], 0);
+        if ((K = 'MAP') or (K = 'MAPOLD')) and (GetFieldFromPipeString(Spec[j], 1) = OldPin) then
+            if (NewPin = '') or (GetFieldFromPipeString(Spec[j], 2) = NewPin) then Result := True;
+        j := j + 1;
+    end;
+end;
+
+// The designator of Old's pin whose end is at (X, Y), '' for none
+function EdOldPinAt(Old: ISch_Component; X, Y: Integer): String;
+var
+    Iter       : ISch_Iterator;
+    Pin        : ISch_Pin;
+    PX, PY, PD : Integer;
+begin
+    Result := '';
+    Iter := Old.SchIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(ePin));
+    Iter.AddFilter_CurrentPartPrimitives;
+    Iter.AddFilter_CurrentDisplayModePrimitives;
+    Pin := Iter.FirstSchObject;
+    while (Pin <> nil) and (Result = '') do
+    begin
+        EdPinEnd(Pin, PX, PY, PD);
+        if (PX = X) and (PY = Y) then Result := Pin.Designator;
+        Pin := Iter.NextSchObject;
+    end;
+    Old.SchIterator_Destroy(Iter);
+end;
+
+// Why Comp, put at Old's origin, cannot take Old's place, '' when it can: a pin the block names that the new symbol
+// lacks, another part's body its body overlaps, a pin end on anything but the two parts - unless it is the old end
+// of the pin mapped onto it, whose wiring then carries on
+function EdReplaceClash(Comp, Old: ISch_Component; Spec: TStringList; i: Integer): String;
+var
+    Iter               : ISch_Iterator;
+    Obj                : ISch_GraphicalObject;
+    L, B, R, T         : Integer;
+    L2, B2, R2, T2     : Integer;
+    X, Y, D, j         : Integer;
+    CompAddr, OldAddr  : Integer;
+    K, P, What         : String;
+    Missing, Bodies    : String;
+    Pins               : String;
+begin
+    Missing := '';
+    j := i + 1;
+    while (j < Spec.Count) and (GetFieldFromPipeString(Spec[j], 0) <> 'END') do
+    begin
+        K := GetFieldFromPipeString(Spec[j], 0);
+        P := '';
+        if (K = 'MAP') then P := GetFieldFromPipeString(Spec[j], 2)
+        else if (K = 'PIN') or (K = 'NOPIN') then P := GetFieldFromPipeString(Spec[j], 1);
+        if (P <> '') then
+            if (EdFindPin(Comp, P) = nil) then Missing := Missing + ' ' + P;
+        j := j + 1;
+    end;
+
+    Bodies := '';
+    CompAddr := Comp.I_ObjectAddress;
+    OldAddr := Old.I_ObjectAddress;
+    EdBody(Comp, L, B, R, T);
+    if (L <= R) then
+    begin
+        Iter := EdDoc.SchIterator_Create;
+        Iter.AddFilter_ObjectSet(MkSet(eSchComponent));
+        Obj := Iter.FirstSchObject;
+        while (Obj <> nil) do
+        begin
+            if (Obj.I_ObjectAddress <> CompAddr) and (Obj.I_ObjectAddress <> OldAddr) then
+            begin
+                EdBody(Obj, L2, B2, R2, T2);
+                if (L2 <= R2) and (L < R2) and (L2 < R) and (B < T2) and (B2 < T) then
+                    Bodies := Bodies + ' ' + Obj.Designator.Text;
+            end;
+            Obj := Iter.NextSchObject;
+        end;
+        EdDoc.SchIterator_Destroy(Iter);
+    end;
+
+    Pins := '';
+    Iter := Comp.SchIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(ePin));
+    Iter.AddFilter_CurrentPartPrimitives;
+    Iter.AddFilter_CurrentDisplayModePrimitives;
+    Obj := Iter.FirstSchObject;
+    while (Obj <> nil) do
+    begin
+        EdPinEnd(Obj, X, Y, D);
+        What := EdTouchAt(X, Y, Comp, Old, True);
+        if (What <> '') then
+            if not EdMapped(Spec, i, EdOldPinAt(Old, X, Y), Obj.Designator) then
+                Pins := Pins + '; pin ' + Obj.Designator + ' on ' + What;
+        Obj := Iter.NextSchObject;
+    end;
+    Comp.SchIterator_Destroy(Iter);
+
+    Result := '';
+    if (Missing <> '') then Result := Result + '; no such pin on the new symbol:' + Missing;
+    if (Bodies <> '') then Result := Result + '; its body overlaps' + Bodies;
+    Result := Result + Pins;
+    if (Result <> '') then Result := 'the new part does not fit at the old origin: ' + Copy(Result, 3, Length(Result));
+end;
+
+// Old's pins whose end something meets (a wire, another part's pin, a label or port) and that no MAP or MAPOLD line
+// carries over: swapping Old out leaves that wiring without a pin
+function EdUnmappedWired(Old, Comp: ISch_Component; Spec: TStringList; i: Integer): String;
+var
+    Iter    : ISch_Iterator;
+    Pin     : ISch_Pin;
+    X, Y, D : Integer;
+begin
+    Result := '';
+    Iter := Old.SchIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(ePin));
+    Iter.AddFilter_CurrentPartPrimitives;
+    Iter.AddFilter_CurrentDisplayModePrimitives;
+    Pin := Iter.FirstSchObject;
+    while (Pin <> nil) do
+    begin
+        EdPinEnd(Pin, X, Y, D);
+        if not EdMapped(Spec, i, Pin.Designator, '') then
+            if (EdTouchAt(X, Y, Old, Comp, True) <> '') then Result := Result + ' ' + Pin.Designator;
+        Pin := Iter.NextSchObject;
+    end;
+    Old.SchIterator_Destroy(Iter);
 end;
 
 procedure EdSkipBlock(Spec: TStringList; var i: Integer);
@@ -1092,9 +1582,10 @@ end;
 
 function EditSchematicFromSpec(SpecPath: String): String;
 var
-    Spec                 : TStringList;
+    Spec, Uids           : TStringList;
     Rec, Kind, Saved     : String;
-    i, j, D, X, Y        : Integer;
+    Why                  : String;
+    i, j, k, n, D, X, Y  : Integer;
     Orient, Mirror       : Integer;
     Obj                  : ISch_GraphicalObject;
     Comp, Old            : ISch_Component;
@@ -1113,6 +1604,7 @@ begin
     EdPlaced := TStringList.Create;
     EdPower := TStringList.Create;
     EdPending := TStringList.Create;
+    EdRemoved := TStringList.Create;
     EdGeom := 'null';
     EdOps := 0;
     Saved := '';
@@ -1154,7 +1646,7 @@ begin
         end
         else if (Kind = 'DELCOMP') then
         begin
-            Comp := EdFindComp('uid:' + GetFieldFromPipeString(Rec, 1));
+            Comp := EdFindComp('uid:' + GetFieldFromPipeString(Rec, 1), 1);
             if (Comp = nil) then EdError(Rec, 'no component with that unique id')
             else EdDeleteComponent(Comp, GetFieldFromPipeString(Rec, 2) = '1', GetFieldFromPipeString(Rec, 3));
         end
@@ -1162,25 +1654,25 @@ begin
         begin
             Obj := EdFindUid(GetFieldFromPipeString(Rec, 1));
             if (Obj = nil) then EdError(Rec, 'no object with that unique id')
+            else if (Obj.ObjectId = eNetLabel) then EdRenameLabel(Obj, GetFieldFromPipeString(Rec, 2), Rec)
             else EdSetText(Obj, GetFieldFromPipeString(Rec, 2));
         end
         else if (Kind = 'RENAME_NET') then
         begin
-            j := 0;
+            // the labels first, then each renamed: a redrawn stub must not change the sheet under the iterator
+            Uids := TStringList.Create;
             Iter := EdDoc.SchIterator_Create;
             Iter.AddFilter_ObjectSet(MkSet(eNetLabel));
             Obj := Iter.FirstSchObject;
             while (Obj <> nil) do
             begin
-                if EdOwnedBySheet(Obj) and (Obj.Text = GetFieldFromPipeString(Rec, 1)) then
-                begin
-                    EdSetText(Obj, GetFieldFromPipeString(Rec, 2));
-                    j := j + 1;
-                end;
+                if EdOwnedBySheet(Obj) and (Obj.Text = GetFieldFromPipeString(Rec, 1)) then Uids.Add(Obj.UniqueId);
                 Obj := Iter.NextSchObject;
             end;
             EdDoc.SchIterator_Destroy(Iter);
-            if (j = 0) then EdError(Rec, 'no net label with that text');
+            for k := 0 to Uids.Count - 1 do EdRenameLabel(EdFindUid(Uids[k]), GetFieldFromPipeString(Rec, 2), Rec);
+            if (Uids.Count = 0) then EdError(Rec, 'no net label with that text');
+            Uids.Free;
         end
         else if (Kind = 'LABEL_TO_PORT') then
         begin
@@ -1196,24 +1688,27 @@ begin
                 EdPlaceNetAt(X, Y, 1, GetFieldFromPipeString(Rec, 2));
             end;
         end
-        else if (Kind = 'ATTACH') or (Kind = 'NOERC') then
+        else if (Kind = 'ATTACH') or (Kind = 'NOERC') or (Kind = 'DETACH') then
         begin
-            Comp := EdFindComp(GetFieldFromPipeString(Rec, 1));
-            Obj := nil;
-            if (Comp <> nil) then Obj := EdFindPin(Comp, GetFieldFromPipeString(Rec, 2));
-            if (Obj = nil) then EdError(Rec, 'no such component or pin')
-            else
+            // every record of the part that shows the pin (des: names each part of a multi-part part)
+            j := 0;
+            n := 1;
+            Comp := EdFindComp(GetFieldFromPipeString(Rec, 1), n);
+            while (Comp <> nil) do
             begin
-                EdPinEnd(Obj, X, Y, D);
-                if (Kind = 'ATTACH') then EdPend(Comp, GetFieldFromPipeString(Rec, 2), GetFieldFromPipeString(Rec, 3), X, Y, D)
-                else EdNoErc(X, Y);
+                Obj := EdFindPin(Comp, GetFieldFromPipeString(Rec, 2));
+                if (Obj <> nil) then
+                begin
+                    j := j + 1;
+                    EdPinEnd(Obj, X, Y, D);
+                    if (Kind = 'ATTACH') then EdPend(Comp, GetFieldFromPipeString(Rec, 2), GetFieldFromPipeString(Rec, 3), X, Y, D)
+                    else if (Kind = 'NOERC') then EdNoErc(X, Y)
+                    else EdDetach(Comp, GetFieldFromPipeString(Rec, 2), Rec);
+                end;
+                n := n + 1;
+                Comp := EdFindComp(GetFieldFromPipeString(Rec, 1), n);
             end;
-        end
-        else if (Kind = 'DETACH') then
-        begin
-            Comp := EdFindComp(GetFieldFromPipeString(Rec, 1));
-            if (Comp = nil) then EdError(Rec, 'no such component')
-            else EdDetach(Comp, GetFieldFromPipeString(Rec, 2), Rec);
+            if (j = 0) then EdError(Rec, 'no such component or pin');
         end
         else if (Kind = 'ENTRY') then
             EdAttachEntry(GetFieldFromPipeString(Rec, 1), GetFieldFromPipeString(Rec, 2), GetFieldFromPipeString(Rec, 3), Rec)
@@ -1239,51 +1734,75 @@ begin
         end
         else if (Kind = 'REPLACE') then
         begin
-            Old := EdFindComp(GetFieldFromPipeString(Rec, 1));
+            // one record: a multi-part part's parts are replaced one by one, by uid
+            n := EdCompCount(GetFieldFromPipeString(Rec, 1));
+            Old := nil;
+            if (n = 1) then Old := EdFindComp(GetFieldFromPipeString(Rec, 1), 1);
             Comp := nil;
             if (Old <> nil) then Comp := EdReplicate(GetFieldFromPipeString(Rec, 2), GetFieldFromPipeString(Rec, 3));
             if (Comp = nil) then
             begin
-                if (Old = nil) then EdError(Rec, 'no such component') else EdError(Rec, 'symbol not found in the library');
+                if (n > 1) then EdError(Rec, 'the designator names ' + IntToStr(n) + ' records (a multi-part part): replace each by uid')
+                else if (Old = nil) then EdError(Rec, 'no such component') else EdError(Rec, 'symbol not found in the library');
                 EdSkipBlock(Spec, i);
             end
             else
             begin
-                // every MAP line's net goes onto the old pin's end first, so the old wiring keeps its net
-                j := i + 1;
-                while (j < Spec.Count) and (GetFieldFromPipeString(Spec[j], 0) <> 'END') do
-                begin
-                    if (GetFieldFromPipeString(Spec[j], 0) = 'MAP') or (GetFieldFromPipeString(Spec[j], 0) = 'MAPOLD') then
-                        EdLabelOldEnd(Old, GetFieldFromPipeString(Spec[j], 1), GetFieldFromPipeString(Spec[j], 3));
-                    j := j + 1;
-                end;
+                // the new part on the old origin, never moved: where it does not fit there the op is refused and
+                // the new part taken back, nothing changed
                 Comp.Designator.Text := Old.Designator.Text;
-                X := CoordToMils(Old.Location.X);
-                Y := CoordToMils(Old.Location.Y);
                 Orient := StrToInt(GetFieldFromPipeString(Rec, 4));
                 if (Orient < 0) then Orient := Old.Orientation;
                 Mirror := StrToInt(GetFieldFromPipeString(Rec, 5));
-                EdRemove(Old);
-                if not EdPut(Comp, X, Y, Orient, Mirror) then
-                    EdError(Rec, 'no clear spot within 10 inches to the right; placed overlapping');
-                EdSetLink(Comp, Rec, 6, 11);
-                EdFinishPart(Comp, Spec, i, Rec);
+                EdPutAt(Comp, CoordToMils(Old.Location.X), CoordToMils(Old.Location.Y), Orient, Mirror);
+                Why := EdReplaceClash(Comp, Old, Spec, i);
+                if (Why <> '') then
+                begin
+                    EdDrop(Comp);
+                    EdError(Rec, Why);
+                    EdSkipBlock(Spec, i);
+                end
+                else
+                begin
+                    // every MAP line's net goes onto the old pin's end first, so the old wiring keeps its net
+                    j := i + 1;
+                    while (j < Spec.Count) and (GetFieldFromPipeString(Spec[j], 0) <> 'END') do
+                    begin
+                        if (GetFieldFromPipeString(Spec[j], 0) = 'MAP') or (GetFieldFromPipeString(Spec[j], 0) = 'MAPOLD') then
+                            EdLabelOldEnd(Old, Comp, GetFieldFromPipeString(Spec[j], 1), GetFieldFromPipeString(Spec[j], 3));
+                        j := j + 1;
+                    end;
+                    // the old pins it could not rewire: connected, but in no pin_map entry
+                    Why := EdUnmappedWired(Old, Comp, Spec, i);
+                    if (Why <> '') then
+                        EdError(Rec, 'not rewired, their wiring left without a pin: the old pins' + Why + ', in no pin_map entry');
+                    EdRemove(Old);
+                    EdSetLink(Comp, Rec, 6, 11);
+                    EdFinishPart(Comp, Spec, i, Rec);
+                end;
             end;
         end
         else if (Kind = 'RELINK') then
         begin
-            Comp := EdFindComp(GetFieldFromPipeString(Rec, 1));
-            if (Comp = nil) then
+            // every record the reference names, each with the block's parameters and reported in placed
+            n := EdCompCount(GetFieldFromPipeString(Rec, 1));
+            if (n = 0) then
             begin
                 EdError(Rec, 'no such component');
                 EdSkipBlock(Spec, i);
             end
             else
             begin
-                EdBeginModify(Comp);
-                EdSetLink(Comp, Rec, 2, 7);
-                EdEndModify(Comp);
-                EdFinishPart(Comp, Spec, i, Rec);
+                j := i;
+                for k := 1 to n do
+                begin
+                    i := j;
+                    Comp := EdFindComp(GetFieldFromPipeString(Rec, 1), k);
+                    EdBeginModify(Comp);
+                    EdSetLink(Comp, Rec, 2, 7);
+                    EdEndModify(Comp);
+                    EdFinishPart(Comp, Spec, i, Rec);
+                end;
             end;
         end
         else if (Kind = 'WIRE') then
@@ -1299,6 +1818,9 @@ begin
             EdPort(StrToInt(GetFieldFromPipeString(Rec, 1)), StrToInt(GetFieldFromPipeString(Rec, 2)),
                    StrToInt(GetFieldFromPipeString(Rec, 3)), StrToInt(GetFieldFromPipeString(Rec, 4)),
                    GetFieldFromPipeString(Rec, 5) = '1', GetFieldFromPipeString(Rec, 6))
+        else if (Kind = 'SHEETPORT') then
+            EdSheetPort(GetFieldFromPipeString(Rec, 1), StrToInt(GetFieldFromPipeString(Rec, 2)),
+                        GetFieldFromPipeString(Rec, 3), Rec)
         else if (Kind = 'GEOMETRY') then
             EdGeom := EdGeometry(0)
         else if (Kind = 'SAVE') then
@@ -1319,13 +1841,14 @@ begin
 
     Result := '{"success": ' + EdBool(EdErrors.Count = 0) + ', "sheet": "' + JSONEscapeString(EdSheetPath) +
               '", "saved": "' + JSONEscapeString(Saved) + '", "ops": ' + IntToStr(EdOps) +
-              ', "errors": [' + EdJoin(EdErrors) + '], "placed": [' + EdJoin(EdPlaced) + '], "pending": [' +
-              EdJoin(EdPending) + '], "geometry": ' + EdGeom + '}';
+              ', "errors": [' + EdJoin(EdErrors) + '], "placed": [' + EdJoin(EdPlaced) + '], "removed": [' +
+              EdJoin(EdRemoved) + '], "pending": [' + EdJoin(EdPending) + '], "geometry": ' + EdGeom + '}';
     Spec.Free;
     EdErrors.Free;
     EdPlaced.Free;
     EdPower.Free;
     EdPending.Free;
+    EdRemoved.Free;
 end;
 
 // annotate_schematic: SHEET lines, ASSIGN|uid|designator lines resolved over all those sheets, SAVE
