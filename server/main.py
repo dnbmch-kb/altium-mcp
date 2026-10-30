@@ -1398,7 +1398,8 @@ async def _run_altium_script(ctx: Context, script: str, timeout_seconds: int = 1
     - Assign findings to the string variable ResultText - it is returned.
     - DelphiScript has NO inline variable declarations. Reuse the provided
       scratch variables: S1..S3 (String), I1..I3 and B1 (Integer),
-      Obj1..Obj5 (IDispatch), List1 (TStringList), IntMan, DbDoc.
+      Obj1..Obj5 (IDispatch), List1 (an empty TStringList the sandbox frees
+      after the script: never free it), IntMan, DbDoc.
     - try/except does NOT catch runtime errors such as bad conversions or
       invalid API calls, so it cannot be relied on to keep a script alive.
     - The sandbox is standalone: helpers and constants from the production
@@ -2053,7 +2054,7 @@ def side_rotation(stored: float, side: str) -> float:
 
 
 @mcp.tool()
-async def place_components(ctx: Context, placements: list, board: str = "") -> str:
+async def place_components(ctx: Context, placements: list, board: str = "", save: bool = True) -> str:
     """
     Place multiple components at absolute positions in a single Altium transaction.
 
@@ -2061,7 +2062,9 @@ async def place_components(ctx: Context, placements: list, board: str = "") -> s
     placing more than one component, since every tool call is a full round
     trip into Altium. The whole batch is one undo step. Every part is read back
     from the board after the transaction; a part that does not hold what was set
-    is an error. The board is not saved.
+    is an error. The board is then saved (save true, the default), so a rules
+    step, DRC, ECO or file read after it meets the placement; with save a board
+    that already holds unsaved changes is refused before anything moves.
 
     Coordinate conventions: x/y are in mils relative to the board origin;
     rotation is in degrees counter-clockwise as seen from the top. A bottom
@@ -2080,15 +2083,19 @@ async def place_components(ctx: Context, placements: list, board: str = "") -> s
               mirrored when it changes side. Omit to keep the current side.
         board (str, optional): full path of the .PcbDoc to place on; it is
             shown first and checked. Default: the current board.
+        save (bool, optional): save the board after the placement (default
+            true); false leaves it unsaved and takes a board with unsaved
+            changes.
 
     Example:
         placements=[{"designator": "R1", "x": 1000, "y": 2000, "rotation": 90},
                     {"designator": "J4", "x": 1050, "y": 2000, "rotation": 90, "side": "bottom"}]
 
     Returns:
-        str: JSON with success, board, placed_count, missing_designators, components
-             [{designator, x, y, side, rotation, altium_rotation}] as the board holds them
-             after the transaction, and errors for every part that does not hold its request
+        str: JSON with success, board, saved (its path once saved, else ""), placed_count,
+             missing_designators, components [{designator, x, y, side, rotation, altium_rotation}]
+             as the board holds them after the transaction, and errors for every part that does
+             not hold its request and for a board left unsaved with save
     """
     logger.info(f"Placing {len(placements)} components")
 
@@ -2134,7 +2141,7 @@ async def place_components(ctx: Context, placements: list, board: str = "") -> s
     if board and (not Path(board).is_absolute() or Path(board).suffix.lower() != ".pcbdoc"):
         return json.dumps({"success": False, "error": f"board must be the full path of a .PcbDoc: {board}"})
 
-    params = {"placements": entries}
+    params = {"placements": entries, "save": bool(save)}
     if board:
         params["board"] = str(Path(board))
     response = await altium_bridge.execute_command("place_components", params)
@@ -2150,6 +2157,8 @@ async def place_components(ctx: Context, placements: list, board: str = "") -> s
         except ValueError:
             return json.dumps({"success": False, "error": "unreadable answer", "raw_response": result[:500]})
     result["errors"] = placement_mismatches(result.get("components", []), wanted)
+    if save and not result.get("saved"):
+        result["errors"].append(f"{result.get('board')} was not saved: it still holds unsaved changes")
     result["success"] = not result["errors"] and not result.get("missing_designators")
     return json.dumps(result, indent=2)
 
@@ -2421,8 +2430,23 @@ async def check_orientation(ctx: Context, cmp_designators: list = None, min_impr
         "suggestions": suggestions,
     }, indent=2)
 
+
+def placement_check_params(cmp_designators, clearance_mils, courtyard) -> dict:
+    """check_placement's request: the designators (none: Altium's selection), the clearance in mils, above 0, and
+    whether to measure courtyards and copper only. ValueError names what is wrong."""
+    if isinstance(clearance_mils, bool) or not isinstance(clearance_mils, (int, float)) or clearance_mils <= 0:
+        raise ValueError(f"clearance_mils must be a number of mils above 0: {clearance_mils!r}")
+    if not isinstance(courtyard, bool):
+        raise ValueError(f"courtyard must be true or false: {courtyard!r}")
+    params = {"clearance_mils": float(clearance_mils), "courtyard": courtyard}
+    if cmp_designators:
+        params["designators"] = [str(d) for d in cmp_designators]
+    return params
+
+
 @mcp.tool()
-async def check_placement(ctx: Context, cmp_designators: list = None, clearance_mils: float = 6) -> str:
+async def check_placement(ctx: Context, cmp_designators: list = None, clearance_mils: float = 6,
+                          courtyard: bool = False) -> str:
     """
     Verify component placement: find overlaps and clearance violations.
 
@@ -2432,6 +2456,15 @@ async def check_placement(ctx: Context, cmp_designators: list = None, clearance_
     primitive-to-primitive distance, so reported distances are true minimum
     distances between any primitives (pads, silk, etc.) of the two parts.
 
+    courtyard=True measures the house rule instead: each part is kept out by
+    its courtyard (Mechanical 15 and every mechanical layer named for a
+    courtyard), or by its copper when it has none (a module footprint that is
+    a board's edge). Two courtyards, or a courtyard and the other part's
+    copper, are compared as boxes, so a part inside another's courtyard is an
+    overlap; two parts without courtyards are compared copper to copper. Silk,
+    assembly and other outlines count for nothing; silk closer than the
+    clearance to the other part's silk is listed apart under silk.
+
     Run this after placing components - a screenshot is not verification.
 
     Args:
@@ -2439,21 +2472,27 @@ async def check_placement(ctx: Context, cmp_designators: list = None, clearance_
             Omit to check the components currently selected in Altium.
         clearance_mils (float): Minimum allowed primitive-to-primitive distance
             in mils (default 6). Pairs closer than this are reported.
+        courtyard (bool): measure courtyards and copper only (default false).
 
     Returns:
-        str: JSON object with checked_count, violation_count, and a violations
-             list. Each violation has a/b designators, type
-             ("bounding_box_overlap" = the parts' outlines intersect, or
-             "clearance" = distance below threshold), distance_mils (0 =
-             touching/overlapping copper or silk), overlap sizes when boxes
-             intersect, and the other part's x/y position. An empty violations
-             list means the placement is clean at the given clearance.
+        str: JSON object with checked_count, measure ("all" or "courtyard"),
+             violation_count, and a violations list. Each violation has a/b
+             designators, type ("bounding_box_overlap" = the parts' outlines
+             intersect, or "clearance" = distance below threshold; with
+             courtyard "overlap" = distance 0 and between, what was compared:
+             "courtyards", "courtyard and copper" or "copper"), distance_mils
+             (0 = touching/overlapping), overlap sizes when boxes intersect,
+             and the other part's x/y position. With courtyard also
+             courtyard_layers (their names), silk_count and silk [{a, b,
+             distance_mils}]. An empty violations list means the placement is
+             clean at the given clearance.
     """
-    logger.info(f"Checking placement (designators={cmp_designators}, clearance={clearance_mils})")
-
-    params = {"clearance_mils": clearance_mils}
-    if cmp_designators:
-        params["designators"] = cmp_designators
+    logger.info(f"Checking placement (designators={cmp_designators}, clearance={clearance_mils}, "
+                f"courtyard={courtyard})")
+    try:
+        params = placement_check_params(cmp_designators, clearance_mils, courtyard)
+    except ValueError as e:
+        return json.dumps({"success": False, "error": str(e)})
 
     response = await altium_bridge.execute_command("check_placement", params)
 

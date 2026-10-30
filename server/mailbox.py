@@ -106,8 +106,8 @@ class Mail:
             return False
 
     def progress_signature(self):
-        """The progress file's (mtime, size), read without opening it, or None: the bridge rewrites the file on
-        every record and its write fails while a reader holds it open, so it is read only when this changed."""
+        """The progress file's (mtime, size), read without opening it, or None: the bridge appends every record
+        through the one handle it holds for the request, so the file is read only when this changed."""
         try:
             st = os.stat(self.folder / "progress.log")
             return st.st_mtime_ns, st.st_size

@@ -683,9 +683,11 @@ var
     i, ValueStart: Integer;
     DesignatorsList: TStringList;
     ClearanceMils: Double;
+    Courtyard: Boolean;
 begin
     DesignatorsList := TStringList.Create;
     ClearanceMils := 6;
+    Courtyard := False;
 
     try
         // Parse parameters from the request
@@ -717,10 +719,12 @@ begin
                 ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
                 ParamValue := TrimJSON(ParamValue);
                 ClearanceMils := SafeStrToFloat(ParamValue);
-            end;
+            end
+            else if (Pos('"courtyard"', RequestData[i]) > 0) then
+                Courtyard := LowerCase(JSONLineValue(RequestData[i])) = 'true';
         end;
 
-        Result := CheckPlacement(DesignatorsList, ClearanceMils);
+        Result := CheckPlacement(DesignatorsList, ClearanceMils, Courtyard);
     finally
         DesignatorsList.Free;
     end;
@@ -733,8 +737,10 @@ var
     i: Integer;
     PlacementsList: TStringList;
     BoardPath: String;
+    Save: Boolean;
 begin
     BoardPath := '';
+    Save := False;
     // Placements arrive as an array of pipe-delimited strings
     // ('Designator|X|Y|Rotation|Layer') so the line-based parser stays robust
     PlacementsList := TStringList.Create;
@@ -745,6 +751,8 @@ begin
         begin
             if (Pos('"board"', RequestData[i]) > 0) then
                 BoardPath := JSONLineValue(RequestData[i]);
+            if (Pos('"save"', RequestData[i]) > 0) then
+                Save := LowerCase(JSONLineValue(RequestData[i])) = 'true';
             // Look for placements array
             if (Pos('"placements"', RequestData[i]) > 0) then
             begin
@@ -769,7 +777,7 @@ begin
 
         if PlacementsList.Count > 0 then
         begin
-            Result := PlaceComponentsFromList(PlacementsList, BoardPath);
+            Result := PlaceComponentsFromList(PlacementsList, BoardPath, Save);
         end
         else
         begin

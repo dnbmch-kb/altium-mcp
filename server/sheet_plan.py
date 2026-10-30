@@ -322,6 +322,17 @@ def plan(geometry, pending, power, draws=()):
     return out
 
 
+def carry(geometry, objects):
+    """The sheet the next edit_schematic call meets once this one drew `objects` (plan's result): `geometry` with
+    their wires, labels and ports added as Altium's first pass reports them (it reports no junctions). A call plans
+    only its own pins, around whatever the earlier calls drew, so a sheet placed in several calls is replayed call
+    by call on this (ugv-pcb BLOCKS/gen/plan_stubs.py --per-call): a pin left no free spot by an earlier call's
+    stubs is refused there, as the live call refuses it."""
+    return dict(geometry, wires=list(geometry.get("wires", [])) + [list(w) for w in objects["wires"]],
+                labels=list(geometry.get("labels", [])) + [list(o) for o in objects["labels"]],
+                ports=list(geometry.get("ports", [])) + [list(o) for o in objects["ports"]])
+
+
 def draw_spec(sheet_path, objects, save=True):
     """Spec lines that draw a plan on the sheet (schematic_edit.pas WIRE, JUNCTION, LABEL, PORT)."""
     r = lambda v: str(int(round(v)))
