@@ -833,8 +833,23 @@ begin
                  '", "models": [' + EdModels(Comp) + ']}');
 end;
 
-// Finish a PLACE / REPLACE / RELINK block: DESCRIPTION, PARAM, PIN and NOPIN lines up to END. DESCRIPTION is the
-// part's own Description, as build_schematic sets it: Altium keeps no parameter of that name.
+// A place op's comment_at: the comment right-aligned at its bottom right corner on the part's origin plus (DX, DY),
+// unrotated, as ugv-pcb's PWRBASE after_place.py sets it on a saved sheet
+procedure EdCommentAt(Comp: ISch_Component; DX, DY: Integer);
+var
+    P : ISch_Parameter;
+begin
+    P := Comp.Comment;
+    EdBeginModify(P);
+    P.Location := Point(MilsToCoord(CoordToMils(Comp.Location.X) + DX), MilsToCoord(CoordToMils(Comp.Location.Y) + DY));
+    P.Justification := eJustify_BottomRight;
+    P.Orientation := eRotate0;
+    EdEndModify(P);
+end;
+
+// Finish a PLACE / REPLACE / RELINK block: DESCRIPTION, PARAM, PIN, NOPIN and COMMENT_AT lines up to END. DESCRIPTION
+// is the part's own Description, as build_schematic sets it: Altium keeps no parameter of that name. COMMENT_AT is
+// set here, in the first pass, so the plan meets the comment where it ends.
 function EdFinishPart(Comp: ISch_Component; Spec: TStringList; var i: Integer; Line: String): Boolean;
 var
     Rec, Kind, Unassigned, Have : String;
@@ -851,6 +866,8 @@ begin
         Kind := GetFieldFromPipeString(Rec, 0);
         if (Kind = 'PARAM') then EdSetParam(Comp, GetFieldFromPipeString(Rec, 1), GetFieldFromPipeString(Rec, 2))
         else if (Kind = 'DESCRIPTION') then Comp.ComponentDescription := GetFieldFromPipeString(Rec, 1)
+        else if (Kind = 'COMMENT_AT') then
+            EdCommentAt(Comp, StrToInt(GetFieldFromPipeString(Rec, 1)), StrToInt(GetFieldFromPipeString(Rec, 2)))
         else if (Kind = 'MAP') then
         begin
             // MAP|old|new|net: the old end was labelled before the swap; stub the new pin with the same net

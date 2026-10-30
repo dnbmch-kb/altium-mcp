@@ -2966,7 +2966,7 @@ async def edit_schematic(ctx: Context, sheet: str, ops: list, power_nets: list =
             {"op": "place", "designator", "symbol_library", "lib_ref", "x", "y", "orient", "mirror",
              "link_library", "db_table", "design_item", "footprint", "alternate_footprints": [..],
              "footprint_library", "comment", "description", "parameters": {}, "pins": {pin: net}, "no_erc": [pin],
-             "part"}
+             "part", "comment_at": [dx, dy]}
                                                          symbol copied from a .SchLib; link_library (e.g.
                                                          "dnbm.IntLib" or "Res-Gen.DbLib") is what it links to;
                                                          part (1 = A, 2 = B, ...) places one part of a multi-part
@@ -2983,7 +2983,10 @@ async def edit_schematic(ctx: Context, sheet: str, ops: list, power_nets: list =
                                                          The part's footprint models become exactly footprint
                                                          (current) and alternate_footprints (a DbLib row's
                                                          Footprint Ref 2 onward); without footprint it has none
-                                                         but what its symbol carries
+                                                         but what its symbol carries. comment_at puts the comment's
+                                                         bottom right corner on the part's origin plus (dx, dy)
+                                                         mils, right-aligned and unrotated, before the connections
+                                                         are planned, so they keep clear of it
             {"op": "replace", "comp", "symbol_library", "lib_ref", "pin_map": {old: new},
              "nets": {new_pin: net}, place's link fields, "description", "parameters": {}}
                                                          every mapped new pin needs its net: the old pin's end

@@ -177,6 +177,18 @@ def _description(op, what):
     return desc
 
 
+def _comment_at(op, what):
+    """A place op's comment_at [dx, dy]: the part's comment right-aligned at its bottom right corner on the part's
+    origin plus (dx, dy) mils, unrotated. A block line, so the first pass sets it and the plan meets the comment where
+    it ends."""
+    at = op.get("comment_at")
+    if at is None:
+        return []
+    if not isinstance(at, (list, tuple)) or len(at) != 2:
+        raise ValueError(f"{what}: comment_at is [dx, dy] in mils from the part's origin: {at!r}")
+    return [f"COMMENT_AT|{_int(at[0], what + ' comment_at dx')}|{_int(at[1], what + ' comment_at dy')}"]
+
+
 def _part_block(op, what, power):
     desc = _description(op, what)
     lines = [] if desc is None else [f"DESCRIPTION|{desc}"]
@@ -253,7 +265,7 @@ def edit_spec(sheet, ops, power_nets=None, save=True):
             if footprint_library:
                 line += f"|{footprint_library}"
             lines.append(line)
-            lines += _part_block(op, what, power) + ["END"]
+            lines += _part_block(op, what, power) + _comment_at(op, what) + ["END"]
         elif kind == "replace":
             footprint_library = _footprint_library(op, what)
             lines.append("REPLACE|{}|{}|{}|{}|{}|{}".format(
