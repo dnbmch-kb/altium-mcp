@@ -2955,7 +2955,7 @@ async def edit_schematic(ctx: Context, sheet: str, ops: list, power_nets: list =
             {"op": "detach_pin", "comp", "pin"}          removes the port, label or stub at a pin and every
                                                          label or port on that stub; a wire that also serves
                                                          something else is refused
-            {"op": "no_erc_pins", "comp", "pins": [..]}
+            {"op": "no_erc_pins", "comp", "pins": [..]}  a pin end with a marker keeps that one, no second
             {"op": "attach_entry", "symbol", "entry", "net"}   a sheet symbol's entry
             {"op": "place", "designator", "symbol_library", "lib_ref", "x", "y", "orient", "mirror",
              "link_library", "db_table", "design_item", "footprint", "alternate_footprints": [..],

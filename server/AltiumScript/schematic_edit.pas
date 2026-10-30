@@ -509,10 +509,24 @@ begin
     EdPlaceNetAt(EX, EY, Dir, Net);
 end;
 
+// A No-ERC marker on a pin end, unless one sits there already
 procedure EdNoErc(X, Y: Integer);
 var
-    Obj : ISch_GraphicalObject;
+    Iter : ISch_Iterator;
+    Obj  : ISch_GraphicalObject;
+    Have : Boolean;
 begin
+    Have := False;
+    Iter := EdDoc.SchIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(eNoERC));
+    Obj := Iter.FirstSchObject;
+    while (Obj <> nil) and (not Have) do
+    begin
+        if EdOwnedBySheet(Obj) and (CoordToMils(Obj.Location.X) = X) and (CoordToMils(Obj.Location.Y) = Y) then Have := True;
+        Obj := Iter.NextSchObject;
+    end;
+    EdDoc.SchIterator_Destroy(Iter);
+    if Have then Exit;
     Obj := SchServer.SchObjectFactory(eNoERC, eCreate_GlobalCopy);
     Obj.Location := Point(MilsToCoord(X), MilsToCoord(Y));
     EdRegister(Obj);
