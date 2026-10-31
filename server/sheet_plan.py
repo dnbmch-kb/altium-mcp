@@ -12,8 +12,9 @@ the bridge draws the result:
 - a power pin, or neighbouring pins of one part on one power net (one shared wire, a junction at each inner end),
   gets a port that points the conventional way only, a supply up and ground down: at the stub end, the same
   200 or 400 mil further out, or, on a pin pointing against that way, beside the pin at the end of a 200 or
-  300 mil jog; the first that touches no body, pin or text, else a label on each pin. A port never points
-  sideways;
+  300 mil jog; the first that touches no body, pin or text and leaves every power pin still to come the room of
+  its label (its stub straight out and the label), else the first that touches nothing, else a label on each pin.
+  A port never points sideways. The signal pins go first, the power pins after them;
 - nothing new may touch a pin end, wire, label or port it does not belong to: that would join two nets. A spot
   that would is never drawn.
 
@@ -172,6 +173,11 @@ def boxes(cand):
     return out
 
 
+def crowds(cand, room):
+    """Does the candidate lie on the room a pin still to come keeps (room: {(part key, pin): [box]})?"""
+    return any(overlaps(b, r) for b, _ in boxes(cand) for kept in room.values() for r in kept)
+
+
 def label_candidate(x, y, d, net, extra=0):
     """A horizontal label on the pin's stub, as the house sheets draw it."""
     dx, dy = DIRS[d]
@@ -277,6 +283,13 @@ def plan(geometry, pending, power, draws=()):
     """The objects to draw: the drawing ops, then the pending connections [[part key, pin, net, x, y, d]] around
     them; power is {net: (style, orientation, shown)}.
 
+    The signal pins are planned first, each on its first spot that touches nothing drawn. A power run then takes its
+    first spot that touches nothing drawn and leaves each power pin still to come the room of its label form, else
+    its first spot that touches nothing drawn. Without that room a ground port at the stub end of a pin straight over
+    a supply pin hangs onto the supply's line, where its stub has to run, and the supply's name lies on the ground's
+    stub, whichever goes first (ugv-pcb PWRBASE's J16, its GND pins 2 and 10 over its supply pins 3 and 9); with it
+    the ground port steps past the supply's stub, or both take their labels.
+
     Returns {wires [[x1, y1, x2, y2]], junctions [[x, y]], labels [[x, y, orient, just, text]], ports
     [[x, y, orient, style, text, shown]], connections [{designator, pins, net, kind, boxes}], overlaps [..],
     errors [..]}."""
@@ -293,27 +306,32 @@ def plan(geometry, pending, power, draws=()):
     drawn, errors = resolve(sheet, list(draws), power)
     out["errors"] += errors
     emit(drawn)
-    jobs, groups = [], defaultdict(list)
+    jobs, groups, room = [], defaultdict(list), {}
     for key, pin, net, x, y, d in pending:
         key, d = str(key), int(d) % 4
         if net in power:
             groups[(key, net, d)].append(((x, y), pin))
+            room[(key, str(pin))] = [b for b, _ in boxes(label_candidate(x, y, d, net))]
         else:
             des = sheet.parts.get(key, {}).get("designator", "?")
-            jobs.append((des, [pin], net, [(x, y)], [label_candidate(x, y, d, net, e) for e in EXTRA]))
+            jobs.append((des, key, [pin], net, [(x, y)], [label_candidate(x, y, d, net, e) for e in EXTRA]))
     for (key, net, d), members in groups.items():
         des = sheet.parts.get(key, {}).get("designator", "?")
         name = dict(members)
         for run in runs(list(name), d):
-            jobs.append((des, [name[q] for q in run], net, run, power_candidates(run, d, net, power[net])))
-    for des, pins, net, own, cands in jobs:
+            jobs.append((des, key, [name[q] for q in run], net, run, power_candidates(run, d, net, power[net])))
+    for des, key, pins, net, own, cands in jobs:
         own = set(own)
+        for pin in pins:
+            room.pop((key, str(pin)), None)
         valid = [c for c in cands if sheet.conflict(c, own) is None]
         if not valid:
             out["errors"].append(f"{des}.{','.join(pins)} ({net}): every spot for its connection touches "
                                  f"{sheet.conflict(cands[0], own)}; nothing drawn")
             continue
-        chosen = next((c for c in valid if not sheet.hits(c)), valid[0])
+        clear = [c for c in valid if not sheet.hits(c)]
+        roomy = [c for c in clear if not crowds(c, room)] if net in power else clear
+        chosen = (roomy or clear or valid)[0]
         out["overlaps"] += [f"{des}.{','.join(pins)}: {hit}" for hit in sheet.hits(chosen)]
         emit(chosen)
         out["connections"].append(dict(designator=des, pins=pins, net=net,

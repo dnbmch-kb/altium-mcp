@@ -13,10 +13,24 @@ worked around by a script in that session. A row fixed on a branch stays until i
   same: three sheets it saved under a focused scratch PrjPcb (2026-10-30) answered `detached_from: ""` and stayed attached
   to it in memory, so `closeproject.py` named them `attached` until a script took each out with
   `DM_RemoveSourceDocument(<full path>)`; its detach (`schematic_utils.pas`, after `DM_CreateNewDocument`) did not run.
-- **`sheet_plan.py`'s `stub_for` sizes a label's stub at 60 mil per character plus 200** (`sheet_plan.py:83`), while
+- **`sheet_plan.py`'s `stub_for` sizes a label's stub at 60 mil per character plus 200** (`sheet_plan.stub_for`), while
   `rename_label` sizes the redrawn stub from Altium's own measure of the text (the house rule: a stub as long as its
   text), so the planner and a rename disagree. Fix: one measure - the planner takes the stroke font's advance
   (`tools/altium` measures 0.98 x height per character, box 1.54 x height) and the rename the same.
+- **`sheet_plan` leaves the power ports on one side of a part in more than one column** (house checklist 18, the supply
+  symbols on one side of a part, on a pin end or at their own stub's end, in one column; `sch_style.py` `columns`): each
+  power run takes its own first clean spot, so a port that steps out stands alone (ugv-pcb PWRBASE's J16 in the replay,
+  2026-10-31: its left side's GND ports at x 42000, BAT at 42400; the drawn sheet's U15 left side the same). Fix: once a
+  part's power runs are planned, the ports at their stub ends on one side move out to the farthest one's column wherever
+  that spot passes the same tests, else stay. Done: J16's left side in one column in the replay, and `columns` on the
+  next PWRBASE redraw naming no side the planner could align.
+- **`Mailbox.answer` fails a call when it opens `response.json` while the answer is landing** (`server/mailbox.py`): it
+  takes only `FileNotFoundError` for "no answer yet", so a Windows `PermissionError` on that open ends `wait` and the
+  call with it. Seen in `tests/test_mailbox.py` `WaitTest` (2026-10-31: in one of five runs of the whole offline suite,
+  two of its cases raised `PermissionError: [Errno 13]` on the fake bridge's `response.json`, renamed into place by
+  `os.replace` as the bridge renames its answer; six runs of the module alone passed). Fix: a `PermissionError` on the
+  answer reads as no answer yet, and the next poll reads it whole. Done: the whole offline suite passes run after run,
+  and a `WaitTest` case that holds `response.json` open across a poll waits instead of failing.
 - **`replace` onto mapped pin ends labels them twice and reports the new pins as errors** (live 2026-10-30, a
   TC33X pot replaced by a RESISTOR whose pin ends land on the pot's mapped ends): `EdLabelOldEnd` puts a label on
   each old end although the old stub already carries that net's label, the plan then finds no spot for the new pins

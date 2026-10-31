@@ -100,6 +100,33 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(p["ports"], [[5200, 1100, 3, 4, "GND", False]])
         self.assertEqual(p["wires"], [[5000, 1000, 5000, 1100], [5000, 1100, 5200, 1100]])
 
+    def test_a_ground_port_over_a_supply_pin_steps_past_its_stub(self):
+        # J16 on ugv-pcb's PWRBASE, its pinout ruled: GND on pin 2 straight over 12V on pin 3, both pointing left. A
+        # ground port at the end of pin 2's stub hangs onto pin 3's line, and a supply port's name over pin 3's stub
+        # lies on pin 2's, so whichever went first left the other no clean spot
+        power = se.power_table(["12V"])
+        j16 = part(12, "J16", (1100, 850, 1300, 1250), [("2", 1000, 1100, 2), ("3", 1000, 1000, 2)])
+        pins = [[12, "2", "GND", 1000, 1100, 2], [12, "3", "12V", 1000, 1000, 2]]
+        for order in (pins, pins[::-1]):
+            with self.subTest(first=order[0][1]):
+                p = sp.plan(dict(parts=[j16]), order, power)
+                self.assertEqual((p["overlaps"], p["errors"]), ([], []))
+                self.assertEqual(p["ports"], [[500, 1100, 3, 4, "GND", False]])    # past the end of 12V's stub
+                self.assertEqual(p["labels"], [[600, 1000, 0, 0, "12V"]])
+                self.assertEqual(sorted(p["wires"]), [[1000, 1000, 600, 1000], [1000, 1100, 500, 1100]])
+
+    def test_a_ground_pin_over_a_supply_pin_pointing_right_takes_labels_on_both(self):
+        # J16's other column, GND on pin 10 straight over 5V_T3 on pin 9: no ground stub reaches past the supply's
+        # 500 mil label stub, no supply name clears the ground's, so both take their labels
+        power = se.power_table(["5V_T3"])
+        j16 = part(13, "J16", (1500, 850, 1900, 1250), [("9", 2000, 1000, 0), ("10", 2000, 1100, 0)])
+        pins = [[13, "9", "5V_T3", 2000, 1000, 0], [13, "10", "GND", 2000, 1100, 0]]
+        for order in (pins, pins[::-1]):
+            with self.subTest(first=order[0][1]):
+                p = sp.plan(dict(parts=[j16]), order, power)
+                self.assertEqual((p["overlaps"], p["errors"], p["ports"]), ([], [], []))
+                self.assertEqual(sorted(p["labels"]), [[2100, 1000, 0, 0, "5V_T3"], [2100, 1100, 0, 0, "GND"]])
+
     def test_a_connection_that_can_only_touch_another_pin_is_refused(self):
         r3 = part(6, "R3", (5800, 950, 5900, 1050), [("1", 6000, 1000, 0)])
         wall = part(7, "X1", (6700, 900, 6800, 1100), [("1", 6300, 1000, 2)])   # its pin end on every stub

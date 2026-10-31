@@ -237,11 +237,16 @@ house style (style guide section 4):
 | signal, pointing right | stub of 60 mil a character + 200; a horizontal label starting 100 mil out, along the stub |
 | signal, pointing left | the same stub; the label at its far end, the text running back toward the pin |
 | signal, pointing up / down | 100 mil stub, the label horizontal at its end |
-| power, pointing the port's way or sideways | at the stub end, 200 or 400 mil further out: a supply up, ground down, the first that touches no body, pin or text; else a label |
+| power, pointing the port's way or sideways | at the stub end, 200 or 400 mil further out: a supply up, ground down, the first that touches no body, pin or text and leaves each power pin still to come the room of its label (its stub straight out and the label), else the first that touches nothing; else a label |
 | power, pointing against the port's way | a jog of 200 or 300 mil beside the pin, the port at its end pointing the right way |
 | neighbouring pins of one part on one power net (100 mil apart, one line) | one stub each, one shared wire, a junction at each inner end, one port |
 
-A port never points sideways. Nothing new may touch a pin end, wire, label or port of another connection: that
+A port never points sideways. The signal pins are planned first, the power pins after them, and a power port
+leaves each power pin still to come the room of its label: a ground port at the stub end of a pin straight over a
+supply pin hangs onto the supply's line, and the supply's name lies on the ground's stub, whichever goes first
+(ugv-pcb PWRBASE's J16, its GND pins 2 and 10 over its supply pins 3 and 9: 7 overlaps, 2026-10-31). So the ground
+port steps past the supply's stub and the supply takes its label, or both take labels where no ground stub reaches
+past the supply's. Nothing new may touch a pin end, wire, label or port of another connection: that
 joins two nets, so such a spot is never drawn and the op is reported. Text extents are estimates (90 mil high,
 70 mil a character; a port glyph's box reaches 10 mil past it, so a glyph ending on a wire counts as touching);
 the result's `connections` carries every box and `overlaps` names what still touches.
