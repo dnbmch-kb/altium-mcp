@@ -52,3 +52,10 @@ worked around by a script in that session. A row fixed on a branch stays until i
   walks every wire of the sheet on each pass of its dead-end sweep and tests each touched wire's vertices with
   `EdLiveAt`; which step costs the time is not measured. Fix: the per-op cost found and cut. Done: a clear of that
   sheet, timed from its `progress.log`, names the cost removed and the per-op time left.
+
+## `build_schematic` attaches the new sheet to whatever project is focused
+
+Making LED_INJECT's sheet while the collector strip's project was focused attached `LED_INJECT.SchDoc` to
+`COLLECTOR_STRIP.PrjPcb` in memory (2026-10-31; ugv-pcb's LED_INJECT run), so `closeproject.py` refused the strip until
+a one-off `DM_RemoveSourceDocument` script took it off. Fix: `build_schematic` takes the target project by path (or
+refuses while the focused project is another's) and reads back which project holds the new sheet.
