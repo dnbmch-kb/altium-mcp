@@ -204,6 +204,28 @@ def _description(op, what):
     return desc
 
 
+def _clear(op, what):
+    """A relink's clear: a CLEAR|name line per name, after the PARAM lines, each taking every parameter of that name
+    (any case) off the part, so a template's value does not outlive a relink to a row that has none (castellated-
+    modules' LCSC numbers). A name the part lacks is no error; one also in parameters is refused, and so are Comment
+    and Description, the part's own comment and description rather than parameters it can lose."""
+    names = op.get("clear") or ()
+    if not isinstance(names, (list, tuple)):
+        raise ValueError(f"{what}: clear is a list of parameter names: {names!r}")
+    given = {str(k).lower() for k in op.get("parameters") or {}}
+    lines = []
+    for name in names:
+        if not isinstance(name, str):
+            raise ValueError(f"{what}: a clear entry is a parameter name: {name!r}")
+        name = _text(name, f"{what} clear name")
+        if name.lower() in ("comment", "description"):
+            raise ValueError(f"{what}: clear {name}: the part's own {name.lower()}, not a parameter it can lose")
+        if name.lower() in given:
+            raise ValueError(f"{what}: parameter {name} is both set and cleared")
+        lines.append(f"CLEAR|{name}")
+    return lines
+
+
 def _comment_at(op, what):
     """A place op's comment_at [dx, dy]: the part's comment right-aligned at its bottom right corner on the part's
     origin plus (dx, dy) mils, unrotated. A block line, so the first pass sets it and the plan meets the comment where
@@ -320,7 +342,7 @@ def edit_spec(sheet, ops, power_nets=None, save=True):
             footprint_library = _footprint_library(op, what)
             lines.append(f"RELINK|{_comp(op['comp'], what + ' comp')}|{_link_fields(op, what)}"
                          + (f"|{footprint_library}" if footprint_library else ""))
-            lines += _part_block(dict(op, pins={}, no_erc=()), what, power) + ["END"]
+            lines += _part_block(dict(op, pins={}, no_erc=()), what, power) + _clear(op, what) + ["END"]
     if save:
         lines.append("SAVE")
     return lines

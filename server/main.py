@@ -3046,12 +3046,18 @@ async def edit_schematic(ctx: Context, sheet: str, ops: list, power_nets: list =
                                                          it. An old pin connected but in no pin_map entry is an
                                                          error naming it: its wiring is left without a pin
             {"op": "relink", "comp", "link_library", "db_table", "design_item", "footprint",
-             "alternate_footprints", "footprint_library", "comment", "description", "parameters": {}}
+             "alternate_footprints", "footprint_library", "comment", "description", "parameters": {},
+             "clear": [name]}
                                                          changes a part's library link and keeps its symbol: a
                                                          link_library given replaces the old table (an IntLib
                                                          clears it), the footprints replace every old model;
-                                                         the rest as in place. tools/altium/relink_plan.py writes
-                                                         the ops that move a sheet to house.DbLib
+                                                         the rest as in place. A parameter the op does not name
+                                                         keeps its value; clear takes each named parameter (any
+                                                         case) off the part after the link and parameters, a name
+                                                         the part lacks no error, one also in parameters refused,
+                                                         Comment and Description too (the part's own fields).
+                                                         tools/altium/relink_plan.py writes the ops that move a
+                                                         sheet to house.DbLib
             {"op": "wire", "points": [P, P, ...], "junctions": [P]}   orthogonal segments through the points; a
                                                          point P is [x, y] or {"comp": "des:R1", "pin": "2"} (that
                                                          pin's end); junctions only at tees

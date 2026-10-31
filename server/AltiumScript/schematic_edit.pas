@@ -728,6 +728,49 @@ begin
     end;
 end;
 
+// The first parameter of Comp named PName (any case), nil for none; N counts every one of that name
+function EdFindParam(Comp: ISch_Component; PName: String; var N: Integer): ISch_Parameter;
+var
+    Iter  : ISch_Iterator;
+    Param : ISch_Parameter;
+begin
+    Result := nil;
+    N := 0;
+    Iter := Comp.SchIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(eParameter));
+    Param := Iter.FirstSchObject;
+    while (Param <> nil) do
+    begin
+        if (UpperCase(Param.Name) = UpperCase(PName)) then
+        begin
+            if (Result = nil) then Result := Param;
+            N := N + 1;
+        end;
+        Param := Iter.NextSchObject;
+    end;
+    Comp.SchIterator_Destroy(Iter);
+end;
+
+// A CLEAR line: every parameter of Comp named PName (any case) taken off the part, the reverse of EdSetParam's add,
+// one at a time with the iterator gone (it does not outlive a removal); a name the part lacks is no error. One that
+// stays after as many removals as there were is an error
+procedure EdClearParam(Comp: ISch_Component; PName: String; Rec: String);
+var
+    Param : ISch_Parameter;
+    N, k  : Integer;
+begin
+    Param := EdFindParam(Comp, PName, N);
+    k := N;
+    while (Param <> nil) and (k > 0) do
+    begin
+        Comp.RemoveSchObject(Param);
+        SchServer.RobotManager.SendMessage(Comp.I_ObjectAddress, c_BroadCast, SCHM_PrimitiveRegistration, Param.I_ObjectAddress);
+        k := k - 1;
+        Param := EdFindParam(Comp, PName, N);
+    end;
+    if (Param <> nil) then EdError(Rec, 'parameter ' + PName + ' is still on ' + Comp.Designator.Text + ' after its removal');
+end;
+
 // Copy a symbol out of a .SchLib onto EdDoc. Opening the library makes it current: EdDoc is held by reference.
 function EdReplicate(LibPath: String; LibRef: String): ISch_Component;
 var
@@ -847,9 +890,10 @@ begin
     EdEndModify(P);
 end;
 
-// Finish a PLACE / REPLACE / RELINK block: DESCRIPTION, PARAM, PIN, NOPIN and COMMENT_AT lines up to END. DESCRIPTION
-// is the part's own Description, as build_schematic sets it: Altium keeps no parameter of that name. COMMENT_AT is
-// set here, in the first pass, so the plan meets the comment where it ends.
+// Finish a PLACE / REPLACE / RELINK block: DESCRIPTION, PARAM, CLEAR, PIN, NOPIN and COMMENT_AT lines up to END.
+// DESCRIPTION is the part's own Description, as build_schematic sets it: Altium keeps no parameter of that name. CLEAR,
+// a relink's, comes after the PARAM lines and takes a parameter off the part. COMMENT_AT is set here, in the first
+// pass, so the plan meets the comment where it ends.
 function EdFinishPart(Comp: ISch_Component; Spec: TStringList; var i: Integer; Line: String): Boolean;
 var
     Rec, Kind, Unassigned, Have : String;
@@ -865,6 +909,7 @@ begin
         Rec := Spec[i];
         Kind := GetFieldFromPipeString(Rec, 0);
         if (Kind = 'PARAM') then EdSetParam(Comp, GetFieldFromPipeString(Rec, 1), GetFieldFromPipeString(Rec, 2))
+        else if (Kind = 'CLEAR') then EdClearParam(Comp, GetFieldFromPipeString(Rec, 1), Rec)
         else if (Kind = 'DESCRIPTION') then Comp.ComponentDescription := GetFieldFromPipeString(Rec, 1)
         else if (Kind = 'COMMENT_AT') then
             EdCommentAt(Comp, StrToInt(GetFieldFromPipeString(Rec, 1)), StrToInt(GetFieldFromPipeString(Rec, 2)))

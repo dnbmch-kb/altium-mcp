@@ -206,6 +206,30 @@ class EditSpecTest(unittest.TestCase):
         self.assertIn("NOERC|des:U1|32", lines)
         self.assertIn("NOERC|des:U1|33", lines)
 
+    def test_a_relinks_clear_takes_the_named_parameters_off_after_the_link_and_parameters(self):
+        op = {"op": "relink", "comp": "des:C1", "link_library": "house.DbLib", "db_table": "cap_mlcc",
+              "design_item": "GRM32ER71H226KE15L", "footprint": "CAP_1210_3225", "comment": "22uF",
+              "description": "CAP CER 22UF 50V X7R 1210", "parameters": {"Value": "22uF", "MPN": "GRM32ER71H226KE15L"},
+              "clear": ["LCSC", "DNP"]}
+        lines = self.spec([op])
+        i = lines.index("RELINK|des:C1|house.DbLib|cap_mlcc|GRM32ER71H226KE15L|CAP_1210_3225|22uF")
+        self.assertEqual(lines[i + 1:], ["DESCRIPTION|CAP CER 22UF 50V X7R 1210", "PARAM|Value|22uF",
+                                         "PARAM|MPN|GRM32ER71H226KE15L", "CLEAR|LCSC", "CLEAR|DNP", "END", "SAVE"])
+        bare = {k: v for k, v in op.items() if k != "clear"}
+        for none in ({}, {"clear": []}, {"clear": None}):
+            with self.subTest(clear=none):
+                self.assertFalse([l for l in self.spec([dict(bare, **none)]) if l.startswith("CLEAR|")])
+        for bad, msg in ((dict(op, clear=["MPN"]), "parameter MPN is both set and cleared"),
+                         (dict(op, clear=["mpn"]), "parameter mpn is both set and cleared"),
+                         (dict(op, clear=[""]), r"op 0 \(relink\) clear name is empty"),
+                         (dict(op, clear=["LC|SC"]), "may not contain"),
+                         (dict(op, clear="LCSC"), "clear is a list of parameter names"),
+                         (dict(op, clear=[7]), "a clear entry is a parameter name"),
+                         (dict(op, clear=["Comment"]), "the part's own comment"),
+                         (dict(op, clear=["description"]), "the part's own description")):
+            with self.subTest(msg=msg), self.assertRaisesRegex(ValueError, msg):
+                self.spec([bad])
+
     def test_refusals_name_the_problem(self):
         cases = [
             ([{"op": "smash"}], "unknown op"),
@@ -369,6 +393,16 @@ class TwoPassTest(unittest.TestCase):
         self.assertEqual(spec[i], f"PLACE|C1|{self.lib}|CAP|1000|1000|0|0|Cap-Gen.DbLib|Murata_GRM_0402|"
                                   "GRM155R71H104KE14D||")
         self.assertEqual(spec[i + 1:], ["DESCRIPTION|PROOF DESC 0.1UF", "PARAM|Proof|1", "END", "SAVE"])
+
+    def test_the_request_carries_a_relinks_clear_inside_its_block(self):
+        relinked = dict(self.placed(), designator="R1", library="house.DbLib", design_item="ERJ-2RKF4533X")
+        self.answers = [{"success": True, "sheet": str(self.sheet), "saved": str(self.sheet), "ops": 1, "errors": [],
+                         "placed": [relinked], "pending": [], "geometry": None}]
+        r = self.run_tool([{"op": "relink", "comp": "des:R1", "link_library": "house.DbLib",
+                            "design_item": "ERJ-2RKF4533X", "parameters": {"Value": "453k"}, "clear": ["LCSC"]}])
+        self.assertTrue(r["success"], r)
+        self.assertEqual(self.specs[0][-5:], ["RELINK|des:R1|house.DbLib||ERJ-2RKF4533X||", "PARAM|Value|453k",
+                                              "CLEAR|LCSC", "END", "SAVE"])   # nothing to connect: one pass
 
     def test_a_footprint_by_library_path_is_sent_and_read_back_as_bound(self):
         pcblib = self.lib.with_name("Res-Gen.PcbLib")
