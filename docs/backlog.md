@@ -30,3 +30,11 @@ worked around by a script in that session. A row fixed on a branch stays until i
   Every command in its PCB list does the same, and acts on whichever board that is. Fix: a board command without a
   `board` argument refuses when no board is current, naming the focused project, and opens nothing. Done: that call
   answers the refusal and `closedocs.py` on the project's board reports `not_open`.
+- **`delete_component` with `dead_ends` costs about 3.8 s per op on a 203-part sheet** (ugv-pcb PWRBASE's redraw,
+  2026-10-31, measured from the call's `progress.log`, `mail/17804-1793407550870-1/`: the delcomp ops 19 to 33 of 1797
+  at 3.78 s each, 83.9 s to 136.8 s; ops 4 to 10 about 2.3 s each), so clearing the sheet's 203 parts takes about
+  13 min at that rate, Altium's window hung throughout; the call's 1590 `delete` ops after them never ran (a
+  `--recover` watchdog killed Altium after op 33). Per part, `EdDeleteComponent` (`server/AltiumScript/schematic_edit.pas`)
+  walks every wire of the sheet on each pass of its dead-end sweep and tests each touched wire's vertices with
+  `EdLiveAt`; which step costs the time is not measured. Fix: the per-op cost found and cut. Done: a clear of that
+  sheet, timed from its `progress.log`, names the cost removed and the per-op time left.
