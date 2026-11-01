@@ -52,14 +52,6 @@ worked around by a script in that session. A row fixed on a branch stays until i
   walks every wire of the sheet on each pass of its dead-end sweep and tests each touched wire's vertices with
   `EdLiveAt`; which step costs the time is not measured. Fix: the per-op cost found and cut. Done: a clear of that
   sheet, timed from its `progress.log`, names the cost removed and the per-op time left.
-- **`relink`'s `clear` is proven offline only** (castellated-modules C25, 2026-10-31): `EdClearParam`
-  (`server/AltiumScript/schematic_edit.pas`) takes each named parameter off the part with `Comp.RemoveSchObject` and a
-  `SCHM_PrimitiveRegistration` to the component, the reverse of `EdSetParam`'s add, not yet run in Altium; a parameter
-  still there after it is listed in `errors`. Done: a PM1 sheet relinked with `"clear": ["LCSC"]` answers no such
-  error and `c:/Projects/tools/altium/sch_diff.py --git` on the saved sheet names that part's `LCSC` parameter
-  removed. Should Altium keep the parameter, the next try is its text set empty, which leaves the BOM's LCSC cell
-  empty too.
-
 ## `build_schematic` attaches the new sheet to whatever project is focused
 
 Making LED_INJECT's sheet while the collector strip's project was focused attached `LED_INJECT.SchDoc` to
