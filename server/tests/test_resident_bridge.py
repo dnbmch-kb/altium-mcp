@@ -1,6 +1,7 @@
 """The tools' resident bridge as this server meets it (resident_bridge.py), offline: its form closed before a RunScript,
-a dead one's script stopped and the stop given time to land before the restart's RunScript - the restart after a raise
-met TShowException "Error" while its RunScript raced an EditScript:Stop sent and not waited for (2026-11-03).
+one a runtime error may have paused stopped first - its Error box closed, EditScript:Stop waited for and given time to
+land - and its form closed only when it still stands and is no longer busy: a WM_CLOSE under a paused script brings
+Altium's Access violation in ScriptingSystem.DLL (2026-11-03).
 
 Run from server/:  python -m unittest tests.test_resident_bridge -v
 """
@@ -36,29 +37,43 @@ class YieldTest(unittest.TestCase):
         self.events.append("EditScript:Stop")
         return self.launcher
 
-    def yield_(self, shown, dead_already=False, beat_age=0):
+    def yield_(self, shown, dead_already=False, beat_age=0, busy="0"):
         windows = iter(shown)
         user32 = mock.Mock()
         user32.PostMessageW.side_effect = lambda h, msg, w, l: self.events.append(("WM_CLOSE", h))
+        b = {"state": "idle", "folder": "f", "age": beat_age, "busy": busy}
         with mock.patch.object(resident_bridge, "top_windows", side_effect=lambda: next(windows, [])), \
-             mock.patch.object(resident_bridge, "beat", return_value={"state": "idle", "folder": "f", "age": beat_age}), \
+             mock.patch.object(resident_bridge, "beat", return_value=b), \
              mock.patch.object(resident_bridge.ctypes, "windll", mock.Mock(user32=user32), create=True), \
              mock.patch.object(resident_bridge.time, "sleep", side_effect=lambda s: self.events.append(("sleep", s))):
             return resident_bridge.yield_(self.lines.append, self.stop, dead_already)
 
-    def test_one_that_raised_is_stopped_with_its_form_gone_and_the_stop_given_time(self):
-        self.assertFalse(self.yield_([[ERROR]], dead_already=True))
-        self.assertEqual(self.events, ["EditScript:Stop", ("launcher waited", resident_bridge.STOP_WAIT),
-                                       ("sleep", resident_bridge.STOP_SETTLE)])
-
-    def test_a_dead_ones_box_and_form_closed_then_its_script_stopped_and_settled(self):
-        self.assertTrue(self.yield_([[FORM, ERROR], []], beat_age=resident_bridge.STALE + 1))
-        self.assertEqual(self.events, [("WM_CLOSE", 5), ("WM_CLOSE", 77), "EditScript:Stop",
+    def test_one_that_raised_has_its_box_closed_and_is_stopped_with_its_form_gone(self):
+        self.assertFalse(self.yield_([[ERROR], []], dead_already=True))
+        self.assertEqual(self.events, [("WM_CLOSE", 5), "EditScript:Stop",
                                        ("launcher waited", resident_bridge.STOP_WAIT),
                                        ("sleep", resident_bridge.STOP_SETTLE)])
 
+    def test_a_dead_ones_box_closed_then_its_script_stopped_and_its_form_gone_with_it(self):
+        self.assertTrue(self.yield_([[FORM, ERROR], [FORM], []], beat_age=resident_bridge.STALE + 1))
+        self.assertEqual(self.events, [("WM_CLOSE", 5), "EditScript:Stop",
+                                       ("launcher waited", resident_bridge.STOP_WAIT),
+                                       ("sleep", resident_bridge.STOP_SETTLE)])     # no WM_CLOSE of its form
+
+    def test_a_form_the_stop_left_and_no_longer_busy_is_closed_after_the_stop(self):
+        self.assertTrue(self.yield_([[FORM, ERROR], [FORM], [FORM], [FORM], []], beat_age=resident_bridge.STALE + 1))
+        self.assertEqual(self.events, [("WM_CLOSE", 5), "EditScript:Stop",
+                                       ("launcher waited", resident_bridge.STOP_WAIT),
+                                       ("sleep", resident_bridge.STOP_SETTLE), ("WM_CLOSE", 77)])
+
+    def test_a_busy_one_is_stopped_and_its_form_never_closed_while_still_busy(self):
+        self.assertTrue(self.yield_([[FORM], [FORM], [FORM], [FORM]], busy="1500"))
+        self.assertEqual(self.events, ["EditScript:Stop", ("launcher waited", resident_bridge.STOP_WAIT),
+                                       ("sleep", resident_bridge.STOP_SETTLE)])
+        self.assertIn("still busy after EditScript:Stop", self.lines[-1])
+
     def test_a_live_one_is_closed_and_not_stopped(self):
-        self.assertTrue(self.yield_([[FORM], []]))
+        self.assertTrue(self.yield_([[FORM], [FORM], []]))
         self.assertEqual(self.events, [("WM_CLOSE", 77)])
 
     def test_no_form_and_no_raise_is_nothing(self):
@@ -76,6 +91,30 @@ class YieldTest(unittest.TestCase):
         with mock.patch.object(main.subprocess, "Popen", return_value="launcher") as popen:
             self.assertEqual(main.altium_bridge.stop_scripting(), "launcher")
         self.assertIn("-REditScript:Stop", popen.call_args[0][0])
+
+
+class HolderTest(unittest.TestCase):
+    """The bridge reads the lock's holder from the listing of the folder holder beside the lock, never from a file a
+    runner writes: its open of the lock while a taker wrote it was refused, EFOpenError's box pausing the bridge
+    (2026-11-03). This server names itself there while it holds the lock, and nobody once it lets it go."""
+
+    def setUp(self):
+        import script_lock
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        isolate = mock.patch.multiple(script_lock, LOCK=root / "altium_script.lock", HOLD=root / "altium_run.hold")
+        isolate.start()
+        self.addCleanup(isolate.stop)
+        self.lock, self.holder = script_lock, root / "holder"
+
+    def test_named_while_held_and_not_after(self):
+        self.holder.mkdir()
+        (self.holder / "123.pid").touch()                   # a dead holder's, never released
+        self.assertIsNone(self.lock.try_take("test"))
+        self.assertEqual(sorted(p.name for p in self.holder.glob("*.pid")), [f"{os.getpid()}.pid"])
+        self.lock.release()
+        self.assertEqual(list(self.holder.glob("*.pid")), [])
 
 
 if __name__ == "__main__":

@@ -9,7 +9,11 @@ it; one whose record names the script its runner sent (`done`, `x2`: altium_lock
 still run - its done file not written since and one of those X2.EXE running - whether its runner lives or not. A run
 of several scripts holds Altium whole (altium_lock.run_hold, board_build.py): the file altium_run.hold beside the lock
 carries the run's pid and a token its child processes inherit in ALTIUM_RUN_HOLD; while that run lives, a taker
-without the token meets the hold as the holder.
+without the token meets the hold as the holder. The tools' resident bridge, which serves only the holder's requests
+and looks every 20 ms from inside Altium, reads the holder from the folder holder beside the lock - one empty file
+named by the holder's pid, none while the lock is free (keep_holder) - by listing it: a script's open of a file
+another process is writing, renaming or deleting is refused, and a refused open is an Error box that ends the script
+(EFOpenError on the lock, 2026-11-03).
 
 A taker that waits registers as a waiter: one line in queue.txt beside the lock, `who pid N: what (waiting since
 ...)`, its pid in ALTIUM_QUEUE for the processes it starts. The slot goes in the queue's order: while a live waiter's
@@ -239,6 +243,7 @@ def try_take(owner):
         try:
             with open(LOCK, "x", encoding="utf-8") as f:
                 json.dump(dict(pid=os.getpid(), owner=owner, since=time.time()), f)
+            keep_holder(os.getpid())
             drop(mine())                             # its turn came: its line and its starters' leave the queue
             return None
         except FileExistsError:
@@ -248,9 +253,23 @@ def try_take(owner):
             LOCK.unlink(missing_ok=True)             # stale: its process and its script are gone
 
 
+def keep_holder(pid):
+    """The lock's holder named for the resident bridge: the folder holder beside the lock left with one empty file,
+    `<pid>.pid`, or none for None. Written before the lock goes and after it is taken, so it never names a process
+    the lock's record does not."""
+    folder = LOCK.with_name("holder")
+    folder.mkdir(parents=True, exist_ok=True)
+    for marker in folder.glob("*.pid"):
+        if marker.stem != str(pid):
+            marker.unlink(missing_ok=True)
+    if pid:
+        (folder / f"{pid}.pid").touch()
+
+
 def release():
     try:
         if json.loads(LOCK.read_text(encoding="utf-8")).get("pid") == os.getpid():
+            keep_holder(None)
             LOCK.unlink()
     except (OSError, ValueError):
         pass
