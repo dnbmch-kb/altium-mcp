@@ -17,6 +17,7 @@ CONNECTIONS = ("PIN", "MAP", "ATTACH")                         # spec lines whos
 PORT_IO = {"unspecified": 0, "out": 1, "in": 2, "bidi": 3}
 
 _REQUIRED = {
+    "clear_sheet": (),
     "delete": ("uid",),
     "delete_component": ("uid",),
     "rename_label": ("uid", "text"),
@@ -27,7 +28,7 @@ _REQUIRED = {
     "detach_pin": ("comp", "pin"),
     "no_erc_pins": ("comp", "pins"),
     "place": ("designator", "symbol_library", "lib_ref", "x", "y"),
-    "replace": ("comp", "symbol_library", "lib_ref", "pin_map"),
+    "replace": ("comp", "symbol_library", "lib_ref"),             # and pin_map, unless keep_wiring
     "relink": ("comp",),
     "attach_entry": ("symbol", "entry", "net"),
     "wire": ("points",),
@@ -238,6 +239,22 @@ def _comment_at(op, what):
     return [f"COMMENT_AT|{_int(at[0], what + ' comment_at dx')}|{_int(at[1], what + ' comment_at dy')}"]
 
 
+def _tail(*fields):
+    """The optional last fields of a line, '|'-led, the empty ones at its end left off, so a line without them reads
+    as before."""
+    fields = list(fields)
+    while fields and fields[-1] == "":
+        fields.pop()
+    return "".join(f"|{f}" for f in fields)
+
+
+def _flag(op, key, default, what):
+    value = op.get(key, default)
+    if not isinstance(value, bool):
+        raise ValueError(f"{what}: {key} is true or false: {value!r}")
+    return value
+
+
 def _part_block(op, what, power):
     desc = _description(op, what)
     lines = [] if desc is None else [f"DESCRIPTION|{desc}"]
@@ -254,17 +271,43 @@ def _part_block(op, what, power):
     return lines
 
 
-def edit_spec(sheet, ops, power_nets=None, save=True):
-    """Spec lines for one sheet. Ops run in order; a part's pins, parameters and pin map close with END."""
+def _mapped(op, what, power):
+    """A replace's MAP lines, old pin onto new pin with the new pin's net, then its block for the new pins it connects
+    beyond them and its No-ERC pins."""
+    nets = {str(k): v for k, v in (op.get("nets") or {}).items()}
+    if not op["pin_map"]:
+        raise ValueError(f"{what}: empty pin_map")
+    lines, mapped = [], {}
+    for old, new in op["pin_map"].items():
+        new = _text(new, what + " new pin")
+        if new not in nets:
+            raise ValueError(f"{what}: no net for new pin {new} (mapped from old pin {old}); "
+                             "give every mapped pin its net in 'nets'")
+        # several old pins onto one new pin (an exposed pad's numbered copies): one stub, every old end named
+        kind = "MAPOLD" if new in mapped else "MAP"
+        mapped.setdefault(new, []).append(_text(old, what + " old pin"))
+        lines.append(_net_line(kind, f"{old}|{new}", nets[new], power))
+    extra = {k: v for k, v in nets.items() if k not in mapped}
+    return lines + _part_block(dict(op, pins=extra), what, power)
+
+
+def edit_spec(sheet, ops, power_nets=None, save=True, project=None):
+    """Spec lines for one sheet. Ops run in order; a part's pins, parameters and pin map close with END. `project`, the
+    full path of the .PrjPcb the sheet is a document of, rides on the SHEET line: the bridge opens the sheet inside it."""
     path = Path(str(sheet))
     if path.suffix.lower() != ".schdoc" or not path.is_absolute() or not path.is_file():
         raise ValueError(f"sheet must be the full path of an existing .SchDoc: {sheet}")
+    if project is not None:
+        project = Path(str(project))
+        if project.suffix.lower() != ".prjpcb" or not project.is_absolute() or not project.is_file():
+            raise ValueError(f"project must be the full path of an existing .PrjPcb: {project}")
     if not ops:
         raise ValueError("no ops given")
     draw_ops(ops)
     sheet_port_lines(ops)
     power = power_table(power_nets)
-    lines = [f"SHEET|{path}"] + [f"POWERNET|{n}|{s}|{o}|{1 if shown else 0}" for n, (s, o, shown) in power.items()]
+    lines = [f"SHEET|{path}" + _tail("" if project is None else str(project))]
+    lines += [f"POWERNET|{n}|{s}|{o}|{1 if shown else 0}" for n, (s, o, shown) in power.items()]
     for i, op in enumerate(ops):
         kind = op.get("op")
         what = f"op {i} ({kind})"
@@ -275,7 +318,9 @@ def edit_spec(sheet, ops, power_nets=None, save=True):
         for key in _REQUIRED[kind]:
             if key not in op:
                 raise ValueError(f"{what}: missing '{key}'")
-        if kind == "delete":
+        if kind == "clear_sheet":
+            lines.append("CLEARSHEET")
+        elif kind == "delete":
             lines.append(f"DELETE|{_text(op['uid'], what + ' uid')}")
         elif kind == "delete_component":
             keep = ",".join(_text(u, what + " keep") for u in op.get("keep") or ())
@@ -309,35 +354,26 @@ def edit_spec(sheet, ops, power_nets=None, save=True):
             if part is not None:                          # one part of a multi-part symbol (2 = B, ...)
                 if isinstance(part, bool) or not isinstance(part, int) or part < 1:
                     raise ValueError(f"{what}: part must be a whole number from 1: {part!r}")
-            footprint_library = _footprint_library(op, what)
-            if part is not None or footprint_library:
-                line += f"|{'' if part is None else part}"
-            if footprint_library:
-                line += f"|{footprint_library}"
-            lines.append(line)
+            nudge = _flag(op, "nudge", True, what)        # false: at x, y as given, never stepped aside
+            lines.append(line + _tail("" if part is None else str(part), _footprint_library(op, what),
+                                      "" if nudge else "0"))
             lines += _part_block(op, what, power) + _comment_at(op, what) + ["END"]
         elif kind == "replace":
-            footprint_library = _footprint_library(op, what)
+            keep = _flag(op, "keep_wiring", False, what)
+            if keep:
+                given = [k for k in ("pin_map", "nets", "no_erc") if op.get(k)]
+                if given:
+                    raise ValueError(f"{what}: keep_wiring keeps every pin's wiring by its designator: no "
+                                     f"{', '.join(given)}")
+            elif "pin_map" not in op:
+                raise ValueError(f"{what}: missing 'pin_map'")
             lines.append("REPLACE|{}|{}|{}|{}|{}|{}".format(
                 _comp(op["comp"], what + " comp"), _schlib(op["symbol_library"], what),
                 _text(op["lib_ref"], what + " lib_ref"),
                 int(op["orient"]) % 4 if "orient" in op else -1, 1 if op.get("mirror") else 0, _link_fields(op, what))
-                + (f"|{footprint_library}" if footprint_library else ""))
-            nets = {str(k): v for k, v in (op.get("nets") or {}).items()}
-            if not op["pin_map"]:
-                raise ValueError(f"{what}: empty pin_map")
-            mapped = {}
-            for old, new in op["pin_map"].items():
-                new = _text(new, what + " new pin")
-                if new not in nets:
-                    raise ValueError(f"{what}: no net for new pin {new} (mapped from old pin {old}); "
-                                     "give every mapped pin its net in 'nets'")
-                # several old pins onto one new pin (an exposed pad's numbered copies): one stub, every old end named
-                kind = "MAPOLD" if new in mapped else "MAP"
-                mapped.setdefault(new, []).append(_text(old, what + " old pin"))
-                lines.append(_net_line(kind, f"{old}|{new}", nets[new], power))
-            extra = {k: v for k, v in nets.items() if k not in mapped}
-            lines += _part_block(dict(op, pins=extra), what, power) + ["END"]
+                + _tail(_footprint_library(op, what), "1" if keep else ""))
+            lines += (_part_block(dict(op, pins={}, no_erc=()), what, power) if keep else
+                      _mapped(op, what, power)) + ["END"]
         elif kind == "relink":
             footprint_library = _footprint_library(op, what)
             lines.append(f"RELINK|{_comp(op['comp'], what + ' comp')}|{_link_fields(op, what)}"

@@ -1008,6 +1008,7 @@ var
     Pin                         : ISch_Pin;
     Iter                        : ISch_Iterator;
     X, Y, D                     : Integer;
+    Rewired                     : Boolean;
 begin
     Result := True;
     Have := '|';
@@ -1055,9 +1056,12 @@ begin
         end;
         i := i + 1;
     end;
-    // pins the spec left unconnected, by name, so a readback can tell intent from omission
+    // pins the spec left unconnected, by name, so a readback can tell intent from omission; a relink and a replace that
+    // keeps the old wiring (field 12) connect no pin anew
     Unassigned := '';
-    if (GetFieldFromPipeString(Line, 0) <> 'RELINK') then
+    Rewired := (GetFieldFromPipeString(Line, 0) = 'PLACE') or
+               ((GetFieldFromPipeString(Line, 0) = 'REPLACE') and (GetFieldFromPipeString(Line, 12) <> '1'));
+    if Rewired then
     begin
         Iter := Comp.SchIterator_Create;
         Iter.AddFilter_ObjectSet(MkSet(ePin));
@@ -1127,6 +1131,33 @@ begin
         Obj := Iter.NextSchObject;
     end;
     EdDoc.SchIterator_Destroy(Iter);
+end;
+
+// CLEARSHEET: every object the sheet owns off it, each reported - parts, wires, buses, bus entries, junctions, net
+// labels, power ports, ports, sheet symbols, texts, No-ERC markers, directives and text frames, as tools' schgen
+// starts a sheet's full redraw; the sheet's own parameters stay, and so do Altium's automatic junctions, which no
+// iterator returns and the sheet's next load drops. Collected first, removed after: an iterator does not outlive a
+// removal
+procedure EdClear;
+var
+    Iter   : ISch_Iterator;
+    Obj    : ISch_GraphicalObject;
+    Doomed : TInterfaceList;
+    k      : Integer;
+begin
+    Doomed := CreateObject(TInterfaceList);
+    Iter := EdDoc.SchIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(eSchComponent, eWire, eBus, eBusEntry, eJunction, eNetLabel, ePowerObject, ePort,
+                                   eSheetSymbol, eLabel, eNoERC, eParameterSet, eTextFrame));
+    Obj := Iter.FirstSchObject;
+    while (Obj <> nil) do
+    begin
+        if EdOwnedBySheet(Obj) then Doomed.Add(Obj);
+        Obj := Iter.NextSchObject;
+    end;
+    EdDoc.SchIterator_Destroy(Iter);
+    for k := 0 to Doomed.Count - 1 do EdRemove(Doomed[k]);
+    Doomed.Clear;
 end;
 
 // Delete Comp and, with DeadEnds, every wire left connecting nothing, then the labels and ports those wires carried
@@ -1704,6 +1735,51 @@ begin
     if (Result <> '') then Result := 'the new part does not fit at the old origin: ' + Copy(Result, 3, Length(Result));
 end;
 
+// Why Comp, put at Old's origin, does not keep Old's wiring, '' when it does (a replace's keep_wiring): every pin of
+// each part is a pin of the other by its designator, and each new pin ends where its old pin ended
+function EdKeepClash(Comp, Old: ISch_Component): String;
+var
+    Iter       : ISch_Iterator;
+    Pin, Twin  : ISch_Pin;
+    X, Y, D    : Integer;
+    OX, OY, OD : Integer;
+begin
+    Result := '';
+    Iter := Comp.SchIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(ePin));
+    Iter.AddFilter_CurrentPartPrimitives;
+    Iter.AddFilter_CurrentDisplayModePrimitives;
+    Pin := Iter.FirstSchObject;
+    while (Pin <> nil) do
+    begin
+        Twin := EdFindPin(Old, Pin.Designator);
+        if (Twin = nil) then Result := Result + '; new pin ' + Pin.Designator + ' is not on the old part'
+        else
+        begin
+            EdPinEnd(Pin, X, Y, D);
+            EdPinEnd(Twin, OX, OY, OD);
+            if (X <> OX) or (Y <> OY) then
+                Result := Result + '; pin ' + Pin.Designator + ' ends at ' + IntToStr(X) + ', ' + IntToStr(Y) +
+                          ', the old one at ' + IntToStr(OX) + ', ' + IntToStr(OY);
+        end;
+        Pin := Iter.NextSchObject;
+    end;
+    Comp.SchIterator_Destroy(Iter);
+    Iter := Old.SchIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(ePin));
+    Iter.AddFilter_CurrentPartPrimitives;
+    Iter.AddFilter_CurrentDisplayModePrimitives;
+    Pin := Iter.FirstSchObject;
+    while (Pin <> nil) do
+    begin
+        if (EdFindPin(Comp, Pin.Designator) = nil) then
+            Result := Result + '; old pin ' + Pin.Designator + ' is not on the new part';
+        Pin := Iter.NextSchObject;
+    end;
+    Old.SchIterator_Destroy(Iter);
+    if (Result <> '') then Result := 'the new part does not keep the old wiring: ' + Copy(Result, 3, Length(Result));
+end;
+
 // Old's pins whose end something meets (a wire, another part's pin, a label or port) and that no MAP or MAPOLD line
 // carries over: swapping Old out leaves that wiring without a pin
 function EdUnmappedWired(Old, Comp: ISch_Component; Spec: TStringList; i: Integer): String;
@@ -1728,6 +1804,40 @@ begin
     Old.SchIterator_Destroy(Iter);
 end;
 
+// The project the edited sheet is a document of (the SHEET line's field 2): opened by its path or found open, read
+// back by path, the sheet among its documents, made the current project before the sheet opens; '' when so, else why
+// not. A sheet that opens while another project is focused is attached to that one in memory; tools' schgen's call
+// on a scratch ugv-pcb PWRBASE, its project not open, came back with 217 of its 221 parts on new unique ids that no
+// SetState_UniqueId could set back (2026-11-03), and the same draw with its project current first kept all 221
+function EdOpenProject(Path, Sheet: String): String;
+var
+    P      : IProject;
+    i      : Integer;
+    Listed : Boolean;
+begin
+    Result := '';
+    P := GetWorkspace.DM_OpenProject(Path, True);
+    if (P = nil) then
+    begin
+        Result := 'cannot open ' + Path;
+        Exit;
+    end;
+    if (UpperCase(P.DM_ProjectFullPath) <> UpperCase(Path)) then
+    begin
+        Result := 'opening ' + Path + ' gave ' + P.DM_ProjectFullPath;
+        Exit;
+    end;
+    Listed := False;
+    for i := 0 to P.DM_LogicalDocumentCount - 1 do
+        if (UpperCase(P.DM_LogicalDocuments(i).DM_FullPath) = UpperCase(Sheet)) then Listed := True;
+    if not Listed then
+    begin
+        Result := Sheet + ' is not a document of ' + Path;
+        Exit;
+    end;
+    P.DM_SetAsCurrentProject;
+end;
+
 procedure EdSkipBlock(Spec: TStringList; var i: Integer);
 begin
     while (i < Spec.Count) and (GetFieldFromPipeString(Spec[i], 0) <> 'END') do i := i + 1;
@@ -1740,6 +1850,7 @@ var
     Why                  : String;
     i, j, k, n, D, X, Y  : Integer;
     Orient, Mirror       : Integer;
+    Keep                 : Boolean;
     Obj                  : ISch_GraphicalObject;
     Comp, Old            : ISch_Component;
     SrvDoc               : IServerDocument;
@@ -1763,6 +1874,15 @@ begin
     Saved := '';
 
     EdSheetPath := GetFieldFromPipeString(Spec[0], 1);
+    if (GetFieldFromPipeString(Spec[0], 2) <> '') then
+    begin
+        Why := EdOpenProject(GetFieldFromPipeString(Spec[0], 2), EdSheetPath);
+        if (Why <> '') then
+        begin
+            Result := '{"success": false, "error": "' + JSONEscapeString(Why) + '"}';
+            Exit;
+        end;
+    end;
     SrvDoc := OpenLibraryDocument('SCH', EdSheetPath);
     EdDoc := SchServer.GetSchDocumentByPath(EdSheetPath);
     if (EdDoc = nil) or (SrvDoc = nil) then
@@ -1802,6 +1922,8 @@ begin
         if (Kind = 'POWERNET') then
             EdPower.Add(GetFieldFromPipeString(Rec, 1) + '=' + GetFieldFromPipeString(Rec, 2) + ',' +
                         GetFieldFromPipeString(Rec, 3) + ',' + GetFieldFromPipeString(Rec, 4))
+        else if (Kind = 'CLEARSHEET') then
+            EdClear
         else if (Kind = 'DELETE') then
         begin
             Obj := EdFindUid(GetFieldFromPipeString(Rec, 1));
@@ -1888,8 +2010,12 @@ begin
                 // one part of a multi-part symbol: its pins are the ones EdPut and the PIN lines see
                 if (GetFieldFromPipeString(Rec, 13) <> '') then Comp.CurrentPartID := StrToInt(GetFieldFromPipeString(Rec, 13));
                 Comp.Designator.Text := GetFieldFromPipeString(Rec, 1);
-                if not EdPut(Comp, StrToInt(GetFieldFromPipeString(Rec, 4)), StrToInt(GetFieldFromPipeString(Rec, 5)),
-                             StrToInt(GetFieldFromPipeString(Rec, 6)), StrToInt(GetFieldFromPipeString(Rec, 7))) then
+                // nudge 0: at (x, y) as given, never stepped aside (a caller that puts every part on its own spot)
+                if (GetFieldFromPipeString(Rec, 15) = '0') then
+                    EdPutAt(Comp, StrToInt(GetFieldFromPipeString(Rec, 4)), StrToInt(GetFieldFromPipeString(Rec, 5)),
+                            StrToInt(GetFieldFromPipeString(Rec, 6)), StrToInt(GetFieldFromPipeString(Rec, 7)))
+                else if not EdPut(Comp, StrToInt(GetFieldFromPipeString(Rec, 4)), StrToInt(GetFieldFromPipeString(Rec, 5)),
+                                  StrToInt(GetFieldFromPipeString(Rec, 6)), StrToInt(GetFieldFromPipeString(Rec, 7))) then
                     EdError(Rec, 'no clear spot within 10 inches to the right; placed overlapping');
                 EdSetLink(Comp, Rec, 8, 14);
                 EdFinishPart(Comp, Spec, i, Rec);
@@ -1913,13 +2039,15 @@ begin
             else
             begin
                 // the new part on the old origin, never moved: where it does not fit there the op is refused and
-                // the new part taken back, nothing changed
+                // the new part taken back, nothing changed. Keep (keep_wiring, field 12): its pins land on the old
+                // pins' ends by designator and take over their wiring as it is, no label and no stub
                 Comp.Designator.Text := Old.Designator.Text;
                 Orient := StrToInt(GetFieldFromPipeString(Rec, 4));
                 if (Orient < 0) then Orient := Old.Orientation;
                 Mirror := StrToInt(GetFieldFromPipeString(Rec, 5));
                 EdPutAt(Comp, CoordToMils(Old.Location.X), CoordToMils(Old.Location.Y), Orient, Mirror);
-                Why := EdReplaceClash(Comp, Old, Spec, i);
+                Keep := (GetFieldFromPipeString(Rec, 12) = '1');
+                if Keep then Why := EdKeepClash(Comp, Old) else Why := EdReplaceClash(Comp, Old, Spec, i);
                 if (Why <> '') then
                 begin
                     EdDrop(Comp);
@@ -1928,18 +2056,21 @@ begin
                 end
                 else
                 begin
-                    // every MAP line's net goes onto the old pin's end first, so the old wiring keeps its net
-                    j := i + 1;
-                    while (j < Spec.Count) and (GetFieldFromPipeString(Spec[j], 0) <> 'END') do
+                    if not Keep then
                     begin
-                        if (GetFieldFromPipeString(Spec[j], 0) = 'MAP') or (GetFieldFromPipeString(Spec[j], 0) = 'MAPOLD') then
-                            EdLabelOldEnd(Old, Comp, GetFieldFromPipeString(Spec[j], 1), GetFieldFromPipeString(Spec[j], 3));
-                        j := j + 1;
+                        // every MAP line's net goes onto the old pin's end first, so the old wiring keeps its net
+                        j := i + 1;
+                        while (j < Spec.Count) and (GetFieldFromPipeString(Spec[j], 0) <> 'END') do
+                        begin
+                            if (GetFieldFromPipeString(Spec[j], 0) = 'MAP') or (GetFieldFromPipeString(Spec[j], 0) = 'MAPOLD') then
+                                EdLabelOldEnd(Old, Comp, GetFieldFromPipeString(Spec[j], 1), GetFieldFromPipeString(Spec[j], 3));
+                            j := j + 1;
+                        end;
+                        // the old pins it could not rewire: connected, but in no pin_map entry
+                        Why := EdUnmappedWired(Old, Comp, Spec, i);
+                        if (Why <> '') then
+                            EdError(Rec, 'not rewired, their wiring left without a pin: the old pins' + Why + ', in no pin_map entry');
                     end;
-                    // the old pins it could not rewire: connected, but in no pin_map entry
-                    Why := EdUnmappedWired(Old, Comp, Spec, i);
-                    if (Why <> '') then
-                        EdError(Rec, 'not rewired, their wiring left without a pin: the old pins' + Why + ', in no pin_map entry');
                     EdRemove(Old);
                     EdSetLink(Comp, Rec, 6, 11);
                     EdFinishPart(Comp, Spec, i, Rec);

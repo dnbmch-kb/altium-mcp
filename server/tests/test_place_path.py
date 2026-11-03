@@ -22,7 +22,7 @@ UTILS = routines(unit(BRIDGE / "schematic_utils.pas"))
 PLACE_PATH = {"EdSymbol": EDIT, "EdReplicate": EDIT, "EdSpotAdd": EDIT, "EdSpotIndex": EDIT, "EdTaken": EDIT,
               "EdClearSpot": EDIT, "EdPutAt": EDIT, "EdPut": EDIT, "EdSetLink": EDIT, "EdFinishPart": EDIT,
               "EdReportPlaced": EDIT, "EditSchematicFromSpec": EDIT, "OpenLibraryDocument": OTHER,
-              "ReplicateLibSymbol": UTILS}
+              "ReplicateLibSymbol": UTILS, "EdKeepClash": EDIT, "EdClear": EDIT, "EdOpenProject": EDIT}
 
 
 def body(name):
@@ -62,6 +62,46 @@ class PlacePathTest(unittest.TestCase):
         place = loop[loop.index("else if (Kind = 'PLACE') then"):loop.index("else if (Kind = 'REPLACE') then")]
         self.assertRegex(place, r"EdFinishPart\(Comp, Spec, i, Rec\);\s*EdSpotAdd\(Comp\);")
         self.assertIn("SkipAddr", body("EdSpotIndex"))           # the part being placed is not its own obstacle
+
+    def test_a_place_without_its_nudge_goes_where_it_is_told(self):
+        loop = body("EditSchematicFromSpec")
+        place = loop[loop.index("else if (Kind = 'PLACE') then"):loop.index("else if (Kind = 'REPLACE') then")]
+        self.assertRegex(place, r"if \(GetFieldFromPipeString\(Rec, 15\) = '0'\) then\s*EdPutAt\(Comp,")
+        self.assertRegex(place, r"else if not EdPut\(Comp,")
+
+    def test_a_replace_that_keeps_the_wiring_labels_nothing(self):
+        loop = body("EditSchematicFromSpec")
+        replace = loop[loop.index("else if (Kind = 'REPLACE') then"):loop.index("else if (Kind = 'RELINK') then")]
+        self.assertIn("Keep := (GetFieldFromPipeString(Rec, 12) = '1');", replace)
+        self.assertIn("if Keep then Why := EdKeepClash(Comp, Old) else Why := EdReplaceClash(Comp, Old, Spec, i);",
+                      replace)
+        guarded = replace[replace.index("if not Keep then"):replace.index("EdRemove(Old);")]
+        self.assertIn("EdLabelOldEnd(", guarded)                 # the old ends labelled only when not kept
+        self.assertIn("EdUnmappedWired(", guarded)
+        keep = body("EdKeepClash")
+        self.assertIn("EdFindPin(Old, Pin.Designator)", keep)    # each new pin on an old pin of its designator ...
+        self.assertIn("if (X <> OX) or (Y <> OY) then", keep)    # ... ending where it did
+        self.assertIn("EdFindPin(Comp, Pin.Designator) = nil", keep)    # and no old pin left without a new one
+        finish = body("EdFinishPart")
+        self.assertIn("(GetFieldFromPipeString(Line, 12) <> '1')", finish)     # no unassigned pins listed for it
+
+    def test_a_sheet_named_with_its_project_opens_inside_it(self):
+        loop = body("EditSchematicFromSpec")
+        project = loop.index("Why := EdOpenProject(GetFieldFromPipeString(Spec[0], 2), EdSheetPath);")
+        self.assertLess(project, loop.index("SrvDoc := OpenLibraryDocument('SCH', EdSheetPath);"))
+        opened = body("EdOpenProject")
+        self.assertIn("GetWorkspace.DM_OpenProject(Path, True)", opened)
+        self.assertIn("UpperCase(P.DM_ProjectFullPath) <> UpperCase(Path)", opened)    # read back by its path
+        self.assertIn("UpperCase(P.DM_LogicalDocuments(i).DM_FullPath) = UpperCase(Sheet)", opened)   # lists it
+        self.assertLess(opened.index("Listed := False;"), opened.index("P.DM_SetAsCurrentProject;"))
+
+    def test_a_cleared_sheet_is_collected_before_anything_goes(self):
+        clear = body("EdClear")
+        collect, remove = clear.index("Doomed.Add(Obj)"), clear.index("EdRemove(Doomed[k])")
+        self.assertLess(clear.index("SchIterator_Destroy(Iter)"), remove)
+        self.assertLess(collect, clear.index("SchIterator_Destroy(Iter)"))
+        self.assertIn("EdOwnedBySheet(Obj)", clear)
+        self.assertIn("else if (Kind = 'CLEARSHEET') then\n            EdClear", body("EditSchematicFromSpec"))
 
     def test_the_call_lets_the_libraries_go_before_its_answer(self):
         loop = body("EditSchematicFromSpec")

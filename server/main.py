@@ -2913,18 +2913,19 @@ async def _spec_command(command: str, spec_file: str, lines: list) -> str:
     return json.dumps(await _bridge_spec(command, spec_file, lines), indent=2, ensure_ascii=False)
 
 
-async def _edit_command(sheet: str, ops: list, power_nets: list, save: bool, ctx: Context = None) -> str:
+async def _edit_command(sheet: str, ops: list, power_nets: list, save: bool, ctx: Context = None,
+                        project: str = None) -> str:
     """edit_schematic in two passes when it connects pins or draws: the ops run and Altium reports the pins to
     connect and the sheet (pass 1, nothing saved), sheet_plan resolves the wire, junction and port ops and places
     each connection where it touches nothing, pass 2 draws it all, then the sheet ports on the drawn label stubs, and
     saves."""
     try:
-        lines = schematic_edit.edit_spec(sheet, ops, power_nets, save=False)
+        lines = schematic_edit.edit_spec(sheet, ops, power_nets, save=False, project=project)
         draws = schematic_edit.draw_ops(ops)
         ports = schematic_edit.sheet_port_lines(ops)
     except ValueError as e:
         return json.dumps({"success": False, "error": str(e)})
-    path = lines[0].split("|", 1)[1]
+    path = lines[0].split("|")[1]
     power = schematic_edit.power_table(list(power_nets or []) + [d["net"] for d in draws if d["op"] == "port"])
     connects = bool(draws or ports) or any(line.split("|", 1)[0] in schematic_edit.CONNECTIONS for line in lines)
     first = await _bridge_spec("edit_schematic", EDIT_SPEC_FILE,
@@ -2972,7 +2973,8 @@ async def open_project(ctx: Context, project_path: str) -> str:
 
 
 @mcp.tool()
-async def edit_schematic(ctx: Context, sheet: str, ops: list, power_nets: list = None, save: bool = True) -> str:
+async def edit_schematic(ctx: Context, sheet: str, ops: list, power_nets: list = None, save: bool = True,
+                         project: str = None) -> str:
     """
     Edit an EXISTING schematic sheet: delete, rename, connect, place and replace parts.
 
@@ -2994,6 +2996,11 @@ async def edit_schematic(ctx: Context, sheet: str, ops: list, power_nets: list =
     Args:
         sheet: full path of the .SchDoc (opened if it is not).
         ops: list of dicts, run in order:
+            {"op": "clear_sheet"}                        every object the sheet owns off it, each in removed:
+                                                         parts, wires, buses, bus entries, junctions, labels, power
+                                                         ports, ports, sheet symbols, texts, No-ERC markers,
+                                                         directives, text frames; the sheet's parameters stay, and
+                                                         Altium's automatic junctions go at its next load
             {"op": "delete", "uid"}                      any sheet object by unique id
             {"op": "delete_component", "uid", "dead_ends": true, "keep": [uid...]}
                                                          a part, and with dead_ends the wires left connecting
@@ -3014,7 +3021,7 @@ async def edit_schematic(ctx: Context, sheet: str, ops: list, power_nets: list =
             {"op": "place", "designator", "symbol_library", "lib_ref", "x", "y", "orient", "mirror",
              "link_library", "db_table", "design_item", "footprint", "alternate_footprints": [..],
              "footprint_library", "comment", "description", "parameters": {}, "pins": {pin: net}, "no_erc": [pin],
-             "part", "comment_at": [dx, dy]}
+             "part", "comment_at": [dx, dy], "nudge": true}
                                                          symbol copied from a .SchLib; link_library (e.g.
                                                          "dnbm.IntLib" or "Res-Gen.DbLib") is what it links to;
                                                          part (1 = A, 2 = B, ...) places one part of a multi-part
@@ -3034,9 +3041,11 @@ async def edit_schematic(ctx: Context, sheet: str, ops: list, power_nets: list =
                                                          but what its symbol carries. comment_at puts the comment's
                                                          bottom right corner on the part's origin plus (dx, dy)
                                                          mils, right-aligned and unrotated, before the connections
-                                                         are planned, so they keep clear of it
+                                                         are planned, so they keep clear of it. A part whose pin
+                                                         or stub end meets something steps 500 mil right until
+                                                         none does; nudge false puts it at x, y as given
             {"op": "replace", "comp", "symbol_library", "lib_ref", "pin_map": {old: new},
-             "nets": {new_pin: net}, place's link fields, "description", "parameters": {}}
+             "nets": {new_pin: net}, place's link fields, "description", "parameters": {}, "keep_wiring"}
                                                          every mapped new pin needs its net: the old pin's end
                                                          gets the same net, so the old wiring keeps it. The new
                                                          part takes the old origin, never moved; refused, nothing
@@ -3044,7 +3053,13 @@ async def edit_schematic(ctx: Context, sheet: str, ops: list, power_nets: list =
                                                          symbol, its body overlaps another part's, or a pin end
                                                          lands on anything but the old end of the pin mapped onto
                                                          it. An old pin connected but in no pin_map entry is an
-                                                         error naming it: its wiring is left without a pin
+                                                         error naming it: its wiring is left without a pin.
+                                                         keep_wiring true (no pin_map, nets or no_erc): the new
+                                                         part's pins take over the old ones' wiring as it is, by
+                                                         designator, no label and no stub; refused, nothing
+                                                         changed, unless both parts have the same pins and each
+                                                         new pin ends where its old one did (a library row swapped
+                                                         for one with the same symbol)
             {"op": "relink", "comp", "link_library", "db_table", "design_item", "footprint",
              "alternate_footprints", "footprint_library", "comment", "description", "parameters": {},
              "clear": [name]}
@@ -3073,6 +3088,9 @@ async def edit_schematic(ctx: Context, sheet: str, ops: list, power_nets: list =
         power_nets: nets drawn as power ports (GND, 3V3 and 5V always are; GND power ground pointing down with its
             name hidden, a supply a bar pointing up).
         save: save the sheet afterwards (default true).
+        project: full path of the .PrjPcb the sheet is a document of: opened by its path (or found open) and made the
+            current project before the sheet opens, refused unless it lists the sheet. Without it a sheet not open
+            yet opens attached to whichever project is focused, and Altium gives its parts new unique ids.
 
     Returns:
         str: JSON with success, sheet, saved, ops, errors [..], placed [{designator, uid, x, y,
@@ -3084,7 +3102,7 @@ async def edit_schematic(ctx: Context, sheet: str, ops: list, power_nets: list =
              library ("Use Component Library", as a hand-placed part does) but the footprint given a
              footprint_library; a model on library Any (neither) is an error.
     """
-    return await _edit_command(sheet, ops, power_nets, save, ctx)
+    return await _edit_command(sheet, ops, power_nets, save, ctx, project)
 
 
 @mcp.tool()

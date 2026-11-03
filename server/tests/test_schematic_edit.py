@@ -53,6 +53,40 @@ class EditSpecTest(unittest.TestCase):
         self.assertEqual(lines[i + 1], "PARAM|Value|1k")
         self.assertEqual(lines[i + 2:i + 5], ["PIN|1|SW_PC|-1|-1", "PIN|2|PC_HOLD_G|-1|-1", "END"])
 
+    def test_clear_sheet_is_one_line(self):
+        self.assertEqual(self.spec([{"op": "clear_sheet"}, {"op": "delete", "uid": "A"}])[-3:],
+                         ["CLEARSHEET", "DELETE|A", "SAVE"])
+
+    def test_a_place_without_its_nudge_says_so_in_its_last_field(self):
+        op = {"op": "place", "designator": "R1", "symbol_library": str(self.lib), "lib_ref": "RESISTOR",
+              "x": 1000, "y": 2000}
+        self.assertIn(f"PLACE|R1|{self.lib}|RESISTOR|1000|2000|0|0|||||", self.spec([op]))
+        self.assertIn(f"PLACE|R1|{self.lib}|RESISTOR|1000|2000|0|0|||||", self.spec([dict(op, nudge=True)]))
+        self.assertIn(f"PLACE|R1|{self.lib}|RESISTOR|1000|2000|0|0||||||||0", self.spec([dict(op, nudge=False)]))
+        self.assertIn(f"PLACE|R1|{self.lib}|RESISTOR|1000|2000|0|0||||||2||0",
+                      self.spec([dict(op, nudge=False, part=2)]))
+        with self.assertRaisesRegex(ValueError, "nudge is true or false"):
+            self.spec([dict(op, nudge=0)])
+
+    def test_a_replace_that_keeps_the_wiring_maps_no_pin(self):
+        op = {"op": "replace", "comp": "des:J8", "symbol_library": str(self.lib), "lib_ref": "430450809",
+              "keep_wiring": True, "orient": 0, "link_library": "house.DbLib", "db_table": "molex_microfit",
+              "design_item": "430450809", "footprint": "MOL_MF3_2X04_RA_SMT", "comment": "430450809",
+              "description": "Micro-Fit 3.0 header, SMT", "parameters": {"Part Number": "430450809"}, "pins": {}}
+        lines = self.spec([op])
+        i = next(k for k, l in enumerate(lines) if l.startswith("REPLACE|"))
+        self.assertEqual(lines[i:], [f"REPLACE|des:J8|{self.lib}|430450809|0|0|house.DbLib|molex_microfit|430450809|"
+                                     "MOL_MF3_2X04_RA_SMT|430450809||1", "DESCRIPTION|Micro-Fit 3.0 header, SMT",
+                                     "PARAM|Part Number|430450809", "END", "SAVE"])
+        for key, value in (("pin_map", {"1": "1"}), ("nets", {"1": "GND"}), ("no_erc", ["3"])):
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, f"keep_wiring keeps every pin's wiring by "
+                                                                           f"its designator: no {key}"):
+                self.spec([dict(op, **{key: value})])
+        with self.assertRaisesRegex(ValueError, "keep_wiring is true or false"):
+            self.spec([dict(op, keep_wiring="yes")])
+        with self.assertRaisesRegex(ValueError, "missing 'pin_map'"):
+            self.spec([dict(op, keep_wiring=False)])
+
     def test_place_part_appends_the_part_of_a_multi_part_symbol(self):
         op = {"op": "place", "designator": "U7", "symbol_library": str(self.lib), "lib_ref": "TLV9152IDR",
               "x": 1000, "y": 2000, "part": 2, "pins": {"5": "IN_B"}}
@@ -370,6 +404,28 @@ class TwoPassTest(unittest.TestCase):
         self.assertEqual(r["saved"], str(self.sheet))
         self.assertEqual(r["connections"][0]["kind"], "label")
         self.assertNotIn("geometry", r)
+
+    def test_a_sheet_opens_in_the_project_the_call_names_and_its_second_pass_needs_none(self):
+        import asyncio
+        import json
+        project = self.sheet.with_name("Board.PrjPcb")
+        project.write_bytes(b"x")
+        geometry = {"parts": [{"key": 77, "designator": "JP1", "body": [1100, 950, 1300, 1250],
+                               "pins": [["1", 1000, 1100, 2, 1100, 1100]], "texts": []}],
+                    "labels": [], "ports": [], "wires": []}
+        self.answers = [{"success": True, "sheet": str(self.sheet), "saved": "", "ops": 1, "errors": [],
+                         "placed": [self.placed()], "pending": [[77, "1", "SDA", 1000, 1100, 2]],
+                         "geometry": geometry},
+                        {"success": True, "sheet": str(self.sheet), "saved": str(self.sheet), "ops": 0,
+                         "errors": [], "placed": [], "pending": [], "geometry": None}]
+        ops = [{"op": "place", "designator": "JP1", "symbol_library": str(self.lib), "lib_ref": "HDR3", "x": 1200,
+                "y": 1100, "link_library": "dnbm.IntLib", "pins": {"1": "SDA"}}]
+        r = json.loads(asyncio.run(self.main.edit_schematic(None, str(self.sheet), ops, project=str(project))))
+        self.assertTrue(r["success"], r)
+        self.assertEqual(self.specs[0][0], f"SHEET|{self.sheet}|{project}")
+        self.assertEqual(self.specs[1][0], f"SHEET|{self.sheet}")              # open in it by then
+        r = json.loads(asyncio.run(self.main.edit_schematic(None, str(self.sheet), ops, project=str(self.lib))))
+        self.assertIn("project must be the full path of an existing .PrjPcb", r["error"])
 
     def test_a_model_left_on_any_library_is_an_error(self):
         self.answers = [{"success": True, "sheet": str(self.sheet), "saved": str(self.sheet), "ops": 1, "errors": [],
