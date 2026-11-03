@@ -117,5 +117,29 @@ class HolderTest(unittest.TestCase):
         self.assertEqual(list(self.holder.glob("*.pid")), [])
 
 
+class BenignTest(unittest.TestCase):
+    """The window a request names as no dialog, read as the bridge compares Application.ActiveFormHandle: it deferred
+    every request while Altium stood in the background, under Altium's own application window (2026-11-03)."""
+    MAIN = (12846206, 1, resident_bridge.MAIN, "X.PrjPcb - Altium Designer", True)
+    APP = (30810610, 1, resident_bridge.APPLICATION, "", True)
+
+    def benign(self, top, active):
+        with mock.patch.object(resident_bridge, "active_window", return_value=active):
+            return resident_bridge.benign(top)
+
+    def test_the_active_window_while_the_main_window_is_enabled(self):
+        self.assertEqual(self.benign([self.MAIN, self.APP], 777), "777")
+
+    def test_the_application_window_while_altium_holds_none_active(self):
+        self.assertEqual(self.benign([self.MAIN, self.APP], 0), "30810610")
+
+    def test_none_under_a_modal_dialog_or_without_a_main_window(self):
+        self.assertEqual(self.benign([(12846206, 1, resident_bridge.MAIN, "X", False), self.APP], 0), "0")
+        self.assertEqual(self.benign([self.APP], 0), "0")
+
+    def test_as_the_bridge_compares_it(self):
+        self.assertEqual(self.benign([self.MAIN, self.APP], 0x80000001), "-2147483647")
+
+
 if __name__ == "__main__":
     unittest.main()

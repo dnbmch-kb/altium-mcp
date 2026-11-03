@@ -124,25 +124,34 @@ def window(top=None):
     return None
 
 
-def benign(top=None):
-    """The window Altium's main thread holds active (GetGUIThreadInfo's hwndActive, the bridge's
-    Application.ActiveFormHandle) as a 32-bit signed integer, while its main window is enabled; '0' while a modal
-    dialog has it disabled, or there is none."""
-    mains = [w for w in (top_windows() if top is None else top) if w[2] == MAIN]
-    if not mains or not all(w[4] for w in mains):
-        return "0"
-
+def active_window(hwnd):
+    """The window active on `hwnd`'s thread (GetGUIThreadInfo's hwndActive); 0 while it holds none - every window of
+    that thread in the background - or the thread cannot be read."""
     class GUITHREADINFO(ctypes.Structure):
         _fields_ = [("cbSize", W.DWORD), ("flags", W.DWORD), ("hwndActive", W.HWND), ("hwndFocus", W.HWND),
                     ("hwndCapture", W.HWND), ("hwndMenuOwner", W.HWND), ("hwndMoveSize", W.HWND),
                     ("hwndCaret", W.HWND), ("rcCaret", W.RECT)]
     u = ctypes.windll.user32
     u.GetWindowThreadProcessId.argtypes = (W.HWND, ctypes.POINTER(W.DWORD))
-    thread = u.GetWindowThreadProcessId(mains[0][0], None)
+    thread = u.GetWindowThreadProcessId(hwnd, None)
     info = GUITHREADINFO(cbSize=ctypes.sizeof(GUITHREADINFO))
     if not thread or not u.GetGUIThreadInfo(thread, ctypes.byref(info)):
+        return 0
+    return info.hwndActive or 0
+
+
+def benign(top=None):
+    """The window a request may be served under, as the bridge compares Application.ActiveFormHandle (a 32-bit
+    signed integer): the window Altium's main thread holds active while its main window is enabled, or, while it
+    holds none (every window of Altium's in the background), Altium's application window (TApplication), which
+    ActiveFormHandle reads then - the bridge deferred every request under it, 2026-11-03; '0' while a modal dialog
+    has the main window disabled, or there is none."""
+    top = top_windows() if top is None else top
+    mains = [w for w in top if w[2] == MAIN]
+    if not mains or not all(w[4] for w in mains):
         return "0"
-    return str(ctypes.c_int32(info.hwndActive or 0).value)
+    active = active_window(mains[0][0]) or next((w[0] for w in top if w[2] == APPLICATION and w[1] == mains[0][1]), 0)
+    return str(ctypes.c_int32(active).value)
 
 
 def answers(mailbox, root, within=ANSWER):
