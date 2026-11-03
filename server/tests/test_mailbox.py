@@ -13,6 +13,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 import win32file
@@ -107,6 +108,12 @@ class Fixture(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.lock = self.root / "altium_script.lock"
+        # the tools' resident bridge out of reach: a call meeting the live one would close its form and start it again
+        isolate = mock.patch.multiple(main.resident, top_windows=lambda: [], DIR=self.root / "resident",
+                                      BEAT=self.root / "resident" / "heartbeat.txt",
+                                      WANTED=self.root / "resident" / "wanted")
+        isolate.start()
+        self.addCleanup(isolate.stop)
 
     def tearDown(self):
         self.tmp.cleanup()

@@ -31,6 +31,9 @@ FORM, CAPTION, APPLICATION, MAIN = "TScriptForm", "resident bridge", "TApplicati
 ANSWER = 0.2            # seconds a no-op may take before the bridge counts as not answering
 STALE = 3               # seconds without a heartbeat (written each second while idle) before the bridge is dead
 GONE_WAIT = 5           # seconds a closed form is given to go
+STOP_WAIT = 30          # seconds EditScript:Stop's launcher is given to hand its line to Altium
+STOP_SETTLE = 1         # seconds after that before the next RunScript: one sent sooner lands before the stop, which
+                        # then ends it (TShowException "Error" at the restart after a raise, 2026-11-03)
 START_WAIT = 90         # seconds the starter is given
 WM_CLOSE = 0x0010
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -165,15 +168,27 @@ def dead(b=None):
     return b is None or b["age"] > STALE
 
 
+def stopped(log, stop):
+    """A script stopped: `stop()` sends EditScript:Stop and returns its launcher, which is waited for (it exits once
+    Altium has the line), then STOP_SETTLE seconds, so the RunScript sent next is not the one the stop ends."""
+    launcher = stop()
+    try:
+        launcher.wait(STOP_WAIT)
+    except subprocess.TimeoutExpired:
+        log(f"resident bridge: EditScript:Stop's launcher still runs after {STOP_WAIT}s")
+    time.sleep(STOP_SETTLE)
+
+
 def yield_(log, stop, dead_already=False):
     """The bridge out of the way of a RunScript, under this server's lock: a dead one's (or `dead_already`, one whose
     request raised) script Error box closed, its form closed by WM_CLOSE and waited for until it is gone, and a dead
-    one's script stopped (`stop`, the server's EditScript:Stop). True when a form was there."""
+    one's script stopped (stopped: `stop`, the caller's EditScript:Stop returning its launcher) - with `dead_already`
+    even when its form is gone. True when a form was there."""
     top = top_windows()
     h = window(top)
     if not h:
         if dead_already:
-            stop()
+            stopped(log, stop)
         return False
     gone_dead = dead_already or dead()
     u = ctypes.windll.user32
@@ -187,7 +202,7 @@ def yield_(log, stop, dead_already=False):
     while window() and time.monotonic() - t0 < GONE_WAIT:
         time.sleep(0.02)
     if gone_dead:
-        stop()
+        stopped(log, stop)
     log(f"resident bridge {'dead' if gone_dead else 'loaded'}: its form closed in {time.monotonic() - t0:.2f}s")
     return True
 

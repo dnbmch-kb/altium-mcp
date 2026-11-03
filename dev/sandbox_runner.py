@@ -54,7 +54,7 @@ def _config_path():
 config = json.load(open(_config_path()))
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from unwedge import stop_via_process, unwedge  # noqa: E402
+from unwedge import stop_launcher, unwedge  # noqa: E402
 from capture_window import owner_exe  # noqa: E402
 sys.path.insert(0, str(REPO / "server"))
 import resident_bridge as resident  # noqa: E402  the tools' resident bridge, which refuses every other script while loaded
@@ -329,7 +329,7 @@ if __name__ == "__main__":
         sys.exit(1)
     try:
         # the sandbox is a RunScript: the tools' resident bridge out of its way first, back after (server/resident.py)
-        resident.yield_(print, stop_via_process)
+        resident.yield_(print, stop_launcher)
         try:
             ok = sandbox(body, timeout, flags)
         finally:

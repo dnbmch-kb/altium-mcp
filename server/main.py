@@ -355,8 +355,8 @@ class AltiumBridge:
             return False
 
     def stop_scripting(self):
-        """EditScript:Stop into the running Altium: a script paused in the debugger stops."""
-        subprocess.Popen(f'"{self.config.altium_exe_path}" -REditScript:Stop', shell=True, env=altium_env())
+        """EditScript:Stop into the running Altium: a script paused in the debugger stops. -> its launcher."""
+        return subprocess.Popen(f'"{self.config.altium_exe_path}" -REditScript:Stop', shell=True, env=altium_env())
 
     async def _execute_command_locked(self, command: str, params: Dict[str, Any], files: Dict[str, str],
                                       stall: float, ctx) -> Dict[str, Any]:

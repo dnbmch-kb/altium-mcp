@@ -79,13 +79,17 @@ def close_dialogs():
     return len(hits)
 
 
+def stop_launcher():
+    """Dispatch EditScript:Stop into the running instance (no focus needed) -> its launcher, None without an X2.EXE."""
+    exe = altium_exe()
+    return subprocess.Popen(f'"{exe}" -REditScript:Stop', shell=True, env=ALTIUM_ENV) if exe else None
+
+
 def stop_via_process():
     """Dispatch EditScript:Stop into the running instance. No focus needed."""
-    exe = altium_exe()
-    if not exe:
-        return False, "X2.EXE not found"
     try:
-        subprocess.Popen(f'"{exe}" -REditScript:Stop', shell=True, env=ALTIUM_ENV)
+        if stop_launcher() is None:
+            return False, "X2.EXE not found"
         time.sleep(1.5)
         return True, "EditScript:Stop dispatched"
     except OSError as e:
@@ -186,7 +190,7 @@ if __name__ == "__main__":
         sys.exit(1)
     try:
         # its probe is a RunScript: the tools' resident bridge out of its way first, back after (server/resident.py)
-        resident.yield_(print, stop_via_process)
+        resident.yield_(print, stop_launcher)
         try:
             ok = unwedge(verify="--no-verify" not in sys.argv)
         finally:

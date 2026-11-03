@@ -15,6 +15,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -44,6 +45,12 @@ class BridgeTextTest(unittest.TestCase):
         main.EXCHANGE_DIR = self.dir                 # the mailbox in a scratch folder
         # and the one-script lock, its hold and queue: the live ones belong to the running Altium's jobs
         script_lock.LOCK, script_lock.HOLD = self.dir / "altium_script.lock", self.dir / "altium_run.hold"
+        # and the tools' resident bridge out of reach: a call meeting the live one would close its form, start it again
+        isolate = mock.patch.multiple(main.resident, top_windows=lambda: [], DIR=self.dir / "resident",
+                                      BEAT=self.dir / "resident" / "heartbeat.txt",
+                                      WANTED=self.dir / "resident" / "wanted")
+        isolate.start()
+        self.addCleanup(isolate.stop)
 
     def tearDown(self):
         for k, v in self.saved.items():
