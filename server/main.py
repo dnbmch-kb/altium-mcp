@@ -30,6 +30,7 @@ import re
 from altium_files import altium_env, ansi_script, read_altium_text, write_altium_text
 from outjob_parser import outjob_project, output_folder, parse_outjob, produced, snapshot
 import mailbox
+import resident_bridge as resident
 import schematic_edit
 import screenshot
 import script_lock
@@ -343,8 +344,26 @@ class AltiumBridge:
             finally:
                 script_lock.release()
 
+    def through_resident(self) -> bool:
+        """Does the tools' resident bridge serve this call (resident.py): its form stands, it holds this server's
+        script units as they are on disk, and it answers a no-op within resident.ANSWER seconds."""
+        try:
+            return (resident.window() is not None and resident.holds(resident.units(self.config.script_path))
+                    and resident.answers(mailbox, EXCHANGE_DIR))
+        except OSError as e:                            # its folder or our units unreadable: today's way
+            logger.warning(f"resident bridge not used: {e}")
+            return False
+
+    def stop_scripting(self):
+        """EditScript:Stop into the running Altium: a script paused in the debugger stops."""
+        subprocess.Popen(f'"{self.config.altium_exe_path}" -REditScript:Stop', shell=True, env=altium_env())
+
     async def _execute_command_locked(self, command: str, params: Dict[str, Any], files: Dict[str, str],
                                       stall: float, ctx) -> Dict[str, Any]:
+        """The call through the tools' resident bridge when it serves it, else today's way with the bridge's form
+        closed first (Altium refuses a RunScript while it stands) and the bridge started again, while it is wanted,
+        before the lock is released; one the bridge took and left unanswered leaves it dead: recovered the same
+        way."""
         mail = mailbox.Mail(EXCHANGE_DIR, command, params, files)
         try:
             # under the lock, a queued request of anyone else was left by a server that gave up or died
@@ -352,16 +371,36 @@ class AltiumBridge:
             if expired:
                 logger.warning(f"expired requests left in the queue: {expired}")
             mailbox.prune(EXCHANGE_DIR)
+        except OSError as e:
+            return {"success": False, "error": f"could not write the request to {mail.folder}: {e}"}
+        through = self.through_resident()
+        if through:
+            mail.params = dict(params, benign=resident.benign())
+        else:
+            resident.yield_(logger.info, self.stop_scripting)
+        try:
+            return await self._call(mail, command, stall, ctx, through)
+        finally:
+            if through and mail.taken() and mail.answer() is None:     # it raised: its script ended under a box
+                resident.yield_(logger.info, self.stop_scripting, dead_already=True)
+                through = False
+            if not through:
+                await asyncio.to_thread(resident.restart, logger.info, altium_env())
+
+    async def _call(self, mail, command: str, stall: float, ctx, through: bool) -> Dict[str, Any]:
+        """One request: posted, then Altium_API>Run launched unless the resident bridge serves it, its answer waited
+        for while the bridge reports progress."""
+        try:
             mail.post()
         except OSError as e:
             return {"success": False, "error": f"could not write the request to {mail.folder}: {e}"}
-        logger.info(f"Queued {command} as {mail.id}")
+        logger.info(f"Queued {command} as {mail.id}" + (" for the resident bridge" if through else ""))
         status = {"id": mail.id, "pid": os.getpid(), "command": command, "state": "queued", "since": time.time(),
                   "stall_seconds": stall, "folder": str(mail.folder)}
         mailbox.write_status(EXCHANGE_DIR, status)
         before = {h for h, _, _ in x2_windows(DIALOG_CLASSES)}
 
-        if not await self.run_altium_script():
+        if not through and not await self.run_altium_script():
             mail.withdraw()
             status.update(state="failed", error="the bridge script could not be started")
             mailbox.write_status(EXCHANGE_DIR, status)
@@ -392,12 +431,14 @@ class AltiumBridge:
             """A box Altium shows during this call. Before the bridge took the request it cannot come from our
             script: Altium refuses a RunScript while another script is still finishing ("Another script executing
             now", a box of its own, 2026-10-23), so the box is closed and the RunScript sent again, the request
-            still queued. After the take it holds our script: seen twice (2 s apart), it is pictured into the
-            request's folder and closed, the way the runner does; True when one was."""
+            still queued - but not a call the resident bridge serves: it sent no RunScript, and the bridge waits
+            under a dialog of Altium's own, which is left alone. After the take it holds our script: seen twice
+            (2 s apart), it is pictured into the request's folder and closed, the way the runner does; True when
+            one was."""
             acted = False
             taken = mail.taken()
             for h, cls, title in x2_windows(DIALOG_CLASSES):
-                if h in before:
+                if h in before or (through and not taken):
                     continue
                 sightings[h] = sightings.get(h, 0) + 1
                 if not taken and sightings[h] == 1 and len(refused) < RUNSCRIPT_RETRIES:
@@ -1517,7 +1558,12 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
     if holder is not None:
         return json.dumps({"success": False, "error": script_lock.describe(holder)})
     try:
-        return await _run_altium_script(ctx, script, timeout_seconds)
+        # the sandbox is a RunScript of its own: the resident bridge's form closed first, the bridge back after
+        resident.yield_(logger.info, altium_bridge.stop_scripting)
+        try:
+            return await _run_altium_script(ctx, script, timeout_seconds)
+        finally:
+            await asyncio.to_thread(resident.restart, logger.info, altium_env())
     finally:
         script_lock.release()
 

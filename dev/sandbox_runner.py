@@ -54,9 +54,10 @@ def _config_path():
 config = json.load(open(_config_path()))
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from unwedge import unwedge  # noqa: E402
+from unwedge import stop_via_process, unwedge  # noqa: E402
 from capture_window import owner_exe  # noqa: E402
 sys.path.insert(0, str(REPO / "server"))
+import resident_bridge as resident  # noqa: E402  the tools' resident bridge, which refuses every other script while loaded
 import script_lock  # noqa: E402  one script at a time across every tool driving Altium
 from altium_files import altium_env, ansi_script, read_altium_text  # noqa: E402
 
@@ -327,7 +328,12 @@ if __name__ == "__main__":
         print(script_lock.describe(holder))
         sys.exit(1)
     try:
-        ok = sandbox(body, timeout, flags)
+        # the sandbox is a RunScript: the tools' resident bridge out of its way first, back after (server/resident.py)
+        resident.yield_(print, stop_via_process)
+        try:
+            ok = sandbox(body, timeout, flags)
+        finally:
+            resident.restart(print, altium_env())
     finally:
         script_lock.release()
     sys.exit(0 if ok else 1)
