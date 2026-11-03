@@ -772,7 +772,10 @@ end;
 // Returns nil when it cannot be opened. A library ('SchLib' or 'PcbLib')
 // opened here goes on OpenedLibraries, and the request closes it before it
 // answers; one that was open before the call never does, so a library the
-// operator has open stays open.
+// operator has open stays open. The document is current when ShowDocument
+// returns: a script runs on Altium's message loop and a Sleep does not turn
+// it (Windows reported X2 hung during edit_schematic calls that slept 1 s a
+// part, 2026-11-03), so nothing waits here.
 function OpenLibraryDocument(Kind: String; Path: String): IServerDocument;
 begin
     Result := FindOpenDocument(Path);
@@ -782,11 +785,7 @@ begin
         if (Result <> nil) and ((UpperCase(Kind) = 'SCHLIB') or (UpperCase(Kind) = 'PCBLIB')) then
             OpenedLibraries.Add(Path);
     end;
-    if (Result <> nil) then
-    begin
-        Client.ShowDocument(Result);
-        Sleep(500);
-    end;
+    if (Result <> nil) then Client.ShowDocument(Result);
 end;
 
 // Close the libraries the running request opened, each by the path it was

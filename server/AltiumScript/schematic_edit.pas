@@ -23,6 +23,12 @@ var
     EdRemoved   : TStringList;    // {uid, kind, text} of every object the call took off the sheet
     EdGeom      : String;
     EdOps       : Integer;
+    EdLibPaths  : TStringList;    // the libraries the call reads symbols from, by NormalizedPath (EdSymbol) ...
+    EdLibDocs   : TInterfaceList; // ... and their documents, in that order
+    EdSymKeys   : TStringList;    // "library path|lib ref" of every symbol the call found ...
+    EdSyms      : TInterfaceList; // ... and its component in the library, in that order
+    EdSpots     : TStringList;    // "x,y" of every pin end, label, power port and port on the sheet (EdClearSpot)
+    EdSpotsOk   : Boolean;        // EdSpots holds the sheet as it is now
 
 procedure EdError(Line: String; Why: String);
 begin
@@ -260,11 +266,6 @@ begin
         Obj := Iter.NextSchObject;
     end;
     EdDoc.SchIterator_Destroy(Iter);
-end;
-
-function EdSomethingAt(X, Y: Integer; Skip: ISch_GraphicalObject): Boolean;
-begin
-    Result := (EdTouchAt(X, Y, Skip, nil, True) <> '');
 end;
 
 // A wire or a pin at (X, Y): what keeps a net alive, unlike a bare label or port
@@ -771,40 +772,143 @@ begin
     if (Param <> nil) then EdError(Rec, 'parameter ' + PName + ' is still on ' + Comp.Designator.Text + ' after its removal');
 end;
 
-// Copy a symbol out of a .SchLib onto EdDoc. Opening the library makes it current: EdDoc is held by reference.
-function EdReplicate(LibPath: String; LibRef: String): ISch_Component;
+// A symbol's component in its .SchLib, found once per call: each library opened once (OpenLibraryDocument makes it
+// current; EdDoc is held by reference) and kept in EdLibDocs, each symbol looked up once and kept in EdSyms, the scan
+// stopping at the hit; nil when the library does not open or lacks the symbol. Nothing waits after the open: a script
+// runs on Altium's message loop and a Sleep does not turn it (Windows reported X2 hung during place calls that slept
+// a second a part, 2026-11-03), so the open is done when it returns.
+function EdSymbol(LibPath: String; LibRef: String): ISch_Component;
 var
-    LibDoc : ISch_Document;
-    Iter   : ISch_Iterator;
-    Prim   : ISch_Component;
-    Found  : ISch_Component;
+    Path, Key : String;
+    LibDoc    : ISch_Document;
+    Iter      : ISch_Iterator;
+    Prim      : ISch_Component;
+    k, n      : Integer;
 begin
     Result := nil;
-    OpenLibraryDocument('SchLib', LibPath);
-    Sleep(500);
-    LibDoc := SchServer.GetCurrentSchDocument;
-    if (LibDoc = nil) then Exit;
-    if (LibDoc.ObjectID <> 33) then Exit;
-    Found := nil;
+    Path := NormalizedPath(LibPath);
+    Key := Path + '|' + LibRef;
+    k := -1;
+    for n := 0 to EdSymKeys.Count - 1 do
+        if (EdSymKeys[n] = Key) then k := n;                     // exact, as the scan compares a lib ref
+    if (k >= 0) then
+    begin
+        Result := EdSyms[k];
+        Exit;
+    end;
+    k := EdLibPaths.IndexOf(Path);
+    if (k >= 0) then LibDoc := EdLibDocs[k]
+    else
+    begin
+        OpenLibraryDocument('SchLib', LibPath);
+        LibDoc := SchServer.GetCurrentSchDocument;
+        if (LibDoc = nil) then Exit;
+        if (LibDoc.ObjectID <> 33) then Exit;
+        EdLibPaths.Add(Path);
+        EdLibDocs.Add(LibDoc);
+    end;
     Iter := LibDoc.SchLibIterator_Create;
     Iter.AddFilter_ObjectSet(MkSet(eSchComponent));
     Prim := Iter.FirstSchObject;
-    while (Prim <> nil) do
+    while (Prim <> nil) and (Result = nil) do
     begin
-        if (Prim.LibReference = LibRef) then Found := Prim;
-        Prim := Iter.NextSchObject;
+        if (Prim.LibReference = LibRef) then Result := Prim
+        else Prim := Iter.NextSchObject;
     end;
     LibDoc.SchIterator_Destroy(Iter);
+    if (Result <> nil) then
+    begin
+        EdSymKeys.Add(Key);
+        EdSyms.Add(Result);
+    end;
+end;
+
+// Copy a symbol out of a .SchLib (EdSymbol) for EdDoc
+function EdReplicate(LibPath: String; LibRef: String): ISch_Component;
+var
+    Found : ISch_Component;
+begin
+    Result := nil;
+    Found := EdSymbol(LibPath, LibRef);
     if (Found <> nil) then Result := ReplicateLibSymbol(Found);
 end;
 
-// True when no pin end or stub end of Comp lands on anything already on the sheet
+// Comp's pin ends (the part and display mode it shows) into EdSpots
+procedure EdSpotAdd(Comp: ISch_Component);
+var
+    Iter    : ISch_Iterator;
+    Pin     : ISch_Pin;
+    X, Y, D : Integer;
+begin
+    Iter := Comp.SchIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(ePin));
+    Iter.AddFilter_CurrentPartPrimitives;
+    Iter.AddFilter_CurrentDisplayModePrimitives;
+    Pin := Iter.FirstSchObject;
+    while (Pin <> nil) do
+    begin
+        EdPinEnd(Pin, X, Y, D);
+        EdSpots.Add(IntToStr(X) + ',' + IntToStr(Y));
+        Pin := Iter.NextSchObject;
+    end;
+    Comp.SchIterator_Destroy(Iter);
+end;
+
+// EdSpots built from the sheet: every pin end of every part it owns but Skip, every label, power port and port -
+// what EdTouchAt finds at a point, wires aside
+procedure EdSpotIndex(Skip: ISch_GraphicalObject);
+var
+    Iter     : ISch_Iterator;
+    Obj      : ISch_GraphicalObject;
+    SkipAddr : Integer;
+begin
+    EdSpots.Clear;
+    SkipAddr := Skip.I_ObjectAddress;
+    Iter := EdDoc.SchIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(eNetLabel, ePowerObject, ePort, eSchComponent));
+    Obj := Iter.FirstSchObject;
+    while (Obj <> nil) do
+    begin
+        if (Obj.I_ObjectAddress <> SkipAddr) and EdOwnedBySheet(Obj) then
+        begin
+            if (Obj.ObjectId = eSchComponent) then EdSpotAdd(Obj)
+            else EdSpots.Add(IntToStr(CoordToMils(Obj.Location.X)) + ',' + IntToStr(CoordToMils(Obj.Location.Y)));
+        end;
+        Obj := Iter.NextSchObject;
+    end;
+    EdDoc.SchIterator_Destroy(Iter);
+    EdSpotsOk := True;
+end;
+
+// Whether anything on the sheet but the part being placed lies at (X, Y): a pin end, label, power port or port there
+// (EdSpots) or a wire through it - EdTouchAt with names, read from the index instead of every pin of every part
+function EdTaken(X, Y: Integer): Boolean;
+var
+    Iter : ISch_Iterator;
+    W    : ISch_GraphicalObject;
+begin
+    Result := (EdSpots.IndexOf(IntToStr(X) + ',' + IntToStr(Y)) >= 0);
+    if Result then Exit;
+    Iter := EdDoc.SchIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(eWire));
+    W := Iter.FirstSchObject;
+    while (W <> nil) and (not Result) do
+    begin
+        if EdOwnedBySheet(W) then Result := EdWireTouches(W, X, Y);
+        W := Iter.NextSchObject;
+    end;
+    EdDoc.SchIterator_Destroy(Iter);
+end;
+
+// True when no pin end or stub end of Comp lands on anything already on the sheet. EdSpots is built once from the
+// sheet and grows by each placed part; any other op marks it stale (EditSchematicFromSpec)
 function EdClearSpot(Comp: ISch_Component): Boolean;
 var
     Iter         : ISch_Iterator;
     Pin          : ISch_Pin;
     X, Y, D      : Integer;
 begin
+    if not EdSpotsOk then EdSpotIndex(Comp);
     Result := True;
     Iter := Comp.SchIterator_Create;
     Iter.AddFilter_ObjectSet(MkSet(ePin));
@@ -814,21 +918,25 @@ begin
     while (Pin <> nil) and Result do
     begin
         EdPinEnd(Pin, X, Y, D);
-        if EdSomethingAt(X, Y, Comp) then Result := False;
+        if EdTaken(X, Y) then Result := False;
         if (D = 0) then X := X + ED_STUB else if (D = 1) then Y := Y + ED_STUB
         else if (D = 2) then X := X - ED_STUB else Y := Y - ED_STUB;
-        if EdSomethingAt(X, Y, Comp) then Result := False;
+        if EdTaken(X, Y) then Result := False;
         Pin := Iter.NextSchObject;
     end;
     Comp.SchIterator_Destroy(Iter);
 end;
 
-// Register Comp with its origin at (X, Y)
+// Register Comp with its origin at (X, Y) and lock its graphics as Altium's own placement leaves a part's
+// (ISNOTACCESIBLE=T, the house rule in #Notes/guides/pcb_workbench.md § House rules): a copy out of a SchLib arrives
+// without it, and UpdatePrimitivesAccessibility is the scripting API's only accessibility call, the one Altium's
+// Circad translator makes on a component it builds
 procedure EdPutAt(Comp: ISch_Component; X, Y, Orient, Mirror: Integer);
 begin
     Comp.Orientation := Orient;
     EdDoc.RegisterSchObjectInContainer(Comp);
     SchServer.RobotManager.SendMessage(EdDoc.I_ObjectAddress, c_BroadCast, SCHM_PrimitiveRegistration, Comp.I_ObjectAddress);
+    Comp.UpdatePrimitivesAccessibility;
     if (Mirror = 1) then Comp.Mirror(Comp.Location);
     Comp.MoveByXY(MilsToCoord(X - CoordToMils(Comp.Location.X)), MilsToCoord(Y - CoordToMils(Comp.Location.Y)));
 end;
@@ -1667,6 +1775,14 @@ begin
         Result := '{"success": false, "error": "target is not a schematic - refusing to edit"}';
         Exit;
     end;
+    EdLibPaths := TStringList.Create;
+    EdLibDocs := CreateObject(TInterfaceList);
+    EdSymKeys := TStringList.Create;
+    EdSyms := CreateObject(TInterfaceList);
+    EdSpots := TStringList.Create;
+    EdSpots.Duplicates := dupIgnore;
+    EdSpots.Sorted := True;
+    EdSpotsOk := False;
 
     SchServer.ProcessControl.PreProcess(EdDoc, '');
     i := 1;
@@ -1674,6 +1790,8 @@ begin
     begin
         Rec := Spec[i];
         Kind := GetFieldFromPipeString(Rec, 0);
+        // a placed part adds its pin ends to EdSpots (below); any other op that can change the sheet makes it stale
+        if (Pos('|' + Kind + '|', '|PLACE|POWERNET|GEOMETRY|SAVE|') = 0) then EdSpotsOk := False;
         // one record per op the server can see; a part names its designator
         if (Kind = 'PLACE') or (Kind = 'REPLACE') or (Kind = 'RELINK') then
             BridgeProgress(LowerCase(Kind) + ' ' + GetFieldFromPipeString(Rec, 1), i, Spec.Count - 1)
@@ -1775,6 +1893,7 @@ begin
                     EdError(Rec, 'no clear spot within 10 inches to the right; placed overlapping');
                 EdSetLink(Comp, Rec, 8, 14);
                 EdFinishPart(Comp, Spec, i, Rec);
+                EdSpotAdd(Comp);
             end;
         end
         else if (Kind = 'REPLACE') then
@@ -1894,6 +2013,12 @@ begin
     EdPower.Free;
     EdPending.Free;
     EdRemoved.Free;
+    // the libraries' components and documents let go before the request closes the libraries it opened
+    EdSyms.Clear;
+    EdLibDocs.Clear;
+    EdSymKeys.Free;
+    EdLibPaths.Free;
+    EdSpots.Free;
 end;
 
 // annotate_schematic: SHEET lines, ASSIGN|uid|designator lines resolved over all those sheets, SAVE
