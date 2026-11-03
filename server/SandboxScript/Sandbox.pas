@@ -56,7 +56,25 @@ begin
 
     try
         // === BEGIN EXPERIMENT (rewritten by the run_altium_script tool) ===
-        SandboxLog('no script loaded');
+        S1 := 'C:\Projects\castellated-modules\modules\PM1-LM5164-12V0\PM1-LM5164-12V0.SchDoc';
+        Obj4 := Client.OpenDocument('SCH', S1);
+        Obj1 := SchServer.GetSchDocumentByPath(S1);
+        if Obj1 = nil then ResultText := 'sheet not open' else begin
+        I1 := 0;
+        Obj2 := Obj1.SchIterator_Create; Obj2.AddFilter_ObjectSet(MkSet(eSchComponent));
+        Obj3 := Obj2.FirstSchObject;
+        while Obj3 <> nil do begin
+          if Obj3.Designator.Text = 'U1' then begin Obj3.SetState_UniqueId('KPLHEWPX'); I1 := I1 + 1; end;
+          if Obj3.Designator.Text = 'R5' then begin Obj3.SetState_UniqueId('GSDNCBPQ'); I1 := I1 + 1; end;
+          if Obj3.Designator.Text = 'R6' then begin Obj3.SetState_UniqueId('TNEUPXOV'); I1 := I1 + 1; end;
+          if Obj3.Designator.Text = 'C8' then begin Obj3.SetState_UniqueId('NUYZHIPE'); I1 := I1 + 1; end;
+          if Obj3.Designator.Text = 'C9' then begin Obj3.SetState_UniqueId('FXZTOKYK'); I1 := I1 + 1; end;
+          Obj3 := Obj2.NextSchObject;
+        end;
+        Obj1.SchIterator_Destroy(Obj2);
+        Obj3 := Client.OpenDocument('SCH', S1); Obj3.Modified := True; Obj3.DoFileSave('');
+        ResultText := 'ids set ' + IntToStr(I1) + ', saved';
+        end;
         // === END EXPERIMENT ===
     except
         SandboxLog('EXCEPTION escaped the script body');

@@ -4,8 +4,8 @@ units are this repo's AltiumScript units and its own, serving the mailbox's requ
 
 While its form stands Altium refuses every other script ("Another script executing now"), so a call goes through it
 when it holds this server's units as they are on disk (the units.txt of the folder its heartbeat names) and answers a
-no-op within ANSWER seconds (serves); otherwise its form is closed first (yield_: WM_CLOSE ends its script; a dead
-one's script Error box closed and the script stopped) and the call goes today's way, a RunScript of Altium_API>Run,
+no-op within ANSWER seconds (serves); otherwise its script is ended first (yield_: WM_CLOSE of its form; one a runtime
+error may have paused stopped first) and the call goes today's way, a RunScript of Altium_API>Run,
 and the bridge is started again before the lock is released while it is wanted (restart: the tools' starter, run
 with --held under this server's lock). Every request names `benign`, the window Altium's main thread holds active
 while its main window is enabled ('0' while a modal dialog is up): the bridge takes a request only while that window,
@@ -168,6 +168,19 @@ def dead(b=None):
     return b is None or b["age"] > STALE
 
 
+def busy(b=None):
+    """Its heartbeat's busy: a tick unfinished - a request still running, or the script paused at a runtime error,
+    which beats on (Resident.pas)."""
+    b = beat() if b is None else b
+    return b is not None and b.get("busy", "0") != "0"
+
+
+def script_boxes(top=None):
+    """Altium's script Error boxes up now: [hwnd]."""
+    return [h for h, _, cls, title, _ in (top_windows() if top is None else top)
+            if cls == "TMessageForm" and title == "Error"]
+
+
 def stopped(log, stop):
     """A script stopped: `stop()` sends EditScript:Stop and returns its launcher, which is waited for (it exits once
     Altium has the line), then STOP_SETTLE seconds, so the RunScript sent next is not the one the stop ends."""
@@ -180,31 +193,40 @@ def stopped(log, stop):
 
 
 def yield_(log, stop, dead_already=False):
-    """The bridge out of the way of a RunScript, under this server's lock: a dead one's (or `dead_already`, one whose
-    request raised) script Error box closed, its form closed by WM_CLOSE and waited for until it is gone, and a dead
-    one's script stopped (stopped: `stop`, the caller's EditScript:Stop returning its launcher) - with `dead_already`
-    even when its form is gone. True when a form was there."""
+    """The bridge out of the way of a RunScript, under this server's lock, its script ended. A live one (beating, no
+    tick unfinished, no script Error box): its form closed by WM_CLOSE, which ends its script, and waited for until it
+    is gone. Any other - `dead_already` (its request raised; even with its form gone), dead, busy or under a script
+    Error box - may be paused at a runtime error, so it is stopped first: its Error box closed and waited for, then
+    stopped (`stop`, the caller's EditScript:Stop returning its launcher), which ends a paused script and its form;
+    only a form still standing then and no longer busy closed by WM_CLOSE: a WM_CLOSE under a paused script brings
+    Altium's Access violation in ScriptingSystem.DLL (2026-11-03). True when a form was there."""
     top = top_windows()
-    h = window(top)
-    if not h:
-        if dead_already:
-            stopped(log, stop)
+    had = window(top)
+    if not had and not dead_already:
         return False
-    gone_dead = dead_already or dead()
     u = ctypes.windll.user32
-    if gone_dead:
-        for box, _, cls, title, _ in top:
-            if cls == "TMessageForm" and title == "Error":
-                log(f"resident bridge dead: its script Error box {box} closed")
-                u.PostMessageW(box, WM_CLOSE, 0, 0)
-    u.PostMessageW(h, WM_CLOSE, 0, 0)
     t0 = time.monotonic()
-    while window() and time.monotonic() - t0 < GONE_WAIT:
-        time.sleep(0.02)
-    if gone_dead:
+    paused = dead_already or dead() or busy() or bool(script_boxes(top))
+    if paused:
+        for box in script_boxes(top):
+            log(f"resident bridge: its script Error box {box} closed")
+            u.PostMessageW(box, WM_CLOSE, 0, 0)
+        while script_boxes() and time.monotonic() - t0 < GONE_WAIT:
+            time.sleep(0.02)
         stopped(log, stop)
-    log(f"resident bridge {'dead' if gone_dead else 'loaded'}: its form closed in {time.monotonic() - t0:.2f}s")
-    return True
+        if window() and busy():
+            log("resident bridge: still busy after EditScript:Stop, its form left standing (a WM_CLOSE under a "
+                "paused script brings Altium's Access violation)")
+            return True
+    if h := window():
+        t1 = time.monotonic()
+        u.PostMessageW(h, WM_CLOSE, 0, 0)
+        while window() and time.monotonic() - t1 < GONE_WAIT:
+            time.sleep(0.02)
+    took = f"{time.monotonic() - t0:.2f}s"
+    log("resident bridge " + (f"loaded: its form closed in {took}" if not paused else
+                              f"stopped: its form gone in {took}" if had else f"stopped: no form, in {took}"))
+    return bool(had)
 
 
 def wanted():
