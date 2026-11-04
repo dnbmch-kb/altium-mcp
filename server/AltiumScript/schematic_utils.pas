@@ -566,6 +566,9 @@ begin
         PinCount := PinCount + 1;
     end;
 
+    // Pins locked, so a copy placed on a sheet carries the lock (ReplicateLibSymbol)
+    SchComponent.PinsMoveable := False;
+
     // Add the component to the library
     CurrentLib.AddSchComponent(SchComponent);
 
@@ -1639,6 +1642,11 @@ end;
 // the shown symbol, such as one just made by create_schematic_symbol, was
 // placed with no body or pins (issue #22). Copy across what the library
 // document holds, and only when the copy came out short.
+// The copy's pins are locked as Altium's own placement locks them: the lock
+// lives in each pin (PINCONGLOMERATE bit 0x20 in the file), the component's
+// PinsMoveable reads False on a library copy whose pins carry no lock, and
+// only setting it False writes the bit into the pins (PWRBASE, 2026-11-04:
+// a pin dragged away from its body on every tool-placed part).
 function ReplicateLibSymbol(Comp: ISch_Component): ISch_Component;
 var
     Iter : ISch_Iterator;
@@ -1646,6 +1654,7 @@ var
     Have, Want : Integer;
 begin
     Result := Comp.Replicate;
+    Result.PinsMoveable := False;
     Want := 0;
     Iter := Comp.SchIterator_Create;
     Obj := Iter.FirstSchObject;
