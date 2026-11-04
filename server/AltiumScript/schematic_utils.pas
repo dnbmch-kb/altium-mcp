@@ -1638,9 +1638,7 @@ end;
 // SchLib), and Replicate copies only what the component itself holds - so
 // the shown symbol, such as one just made by create_schematic_symbol, was
 // placed with no body or pins (issue #22). Copy across what the library
-// document holds, and only when the copy came out short. A library component
-// has moveable pins and the copy inherits that: lock them, as Place from the
-// Libraries panel does, or a pin on the sheet drags away from its body.
+// document holds, and only when the copy came out short.
 function ReplicateLibSymbol(Comp: ISch_Component): ISch_Component;
 var
     Iter : ISch_Iterator;
@@ -1648,7 +1646,6 @@ var
     Have, Want : Integer;
 begin
     Result := Comp.Replicate;
-    Result.PinsMoveable := False;
     Want := 0;
     Iter := Comp.SchIterator_Create;
     Obj := Iter.FirstSchObject;
