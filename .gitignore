@@ -26,3 +26,6 @@ altium-mcp-requests.md
 
 # Altium preference backups: the AltiumPortal\Account key holds the account session tokens (dev/altium_startup.md)
 dev/altium_prefs_backup_*.reg
+
+# Altium derives a structure file beside a script project it opens (the sandbox's)
+*.PrjScrStructure
