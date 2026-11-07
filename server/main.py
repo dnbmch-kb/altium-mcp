@@ -2009,12 +2009,13 @@ async def create_net_class(ctx: Context, class_name: str, net_names: list) -> st
 @mcp.tool()
 async def set_component_position(ctx: Context, cmp_designator: str, x: float, y: float, rotation: float = -1) -> str:
     """
-    Set a component's absolute position in the PCB layout
-    
+    Set a component's position in the PCB layout, in mils from the board origin (not Altium's absolute
+    coordinates: a PcbDoc's stored X/Y less its origin)
+
     Args:
         cmp_designator (str): Designator of the component to position (e.g., "R1", "C5", "U3")
-        x (float): Absolute X position in mils
-        y (float): Absolute Y position in mils
+        x (float): X position in mils from the board origin
+        y (float): Y position in mils from the board origin
         rotation (float): Rotation angle in degrees (0-360), use -1 to keep current rotation
     
     Returns:
