@@ -2045,10 +2045,10 @@ async def set_component_position(ctx: Context, cmp_designator: str, x: float, y:
 @mcp.tool()
 async def move_components(ctx: Context, cmp_designators: list, x_offset: float, y_offset: float, rotation: float = 0) -> str:
     """
-    Move components by RELATIVE offset from their current position (not absolute positioning)
-    
+    Move components by RELATIVE offset from their current position (not to a position)
+
     IMPORTANT: This moves components BY the offset amount, not TO a position.
-    For absolute positioning, use set_component_position instead.
+    To put a component at a position, in mils from the board origin, use set_component_position instead.
     
     Args:
         cmp_designators (list): List of designators of the components to move (e.g., ["R1", "C5", "U3"])
@@ -2103,7 +2103,7 @@ def side_rotation(stored: float, side: str) -> float:
 @mcp.tool()
 async def place_components(ctx: Context, placements: list, board: str = "", save: bool = True) -> str:
     """
-    Place multiple components at absolute positions in a single Altium transaction.
+    Place multiple components at positions in mils from the board origin in a single Altium transaction.
 
     This is the batch version of set_component_position - prefer it whenever
     placing more than one component, since every tool call is a full round
@@ -2113,7 +2113,8 @@ async def place_components(ctx: Context, placements: list, board: str = "", save
     step, DRC, ECO or file read after it meets the placement; with save a board
     that already holds unsaved changes is refused before anything moves.
 
-    Coordinate conventions: x/y are in mils relative to the board origin;
+    Coordinate conventions: x/y are in mils from the board origin (not
+    Altium's absolute coordinates: a PcbDoc's stored X/Y less its origin);
     rotation is in degrees counter-clockwise as seen from the top. A bottom
     part's rotation is that of its footprint mirrored left to right and then
     turned (KiCad's convention): Altium's own flip mirrors top to bottom, so the
@@ -2122,8 +2123,8 @@ async def place_components(ctx: Context, placements: list, board: str = "", save
     Args:
         placements (list): One dict per component:
             - designator (str, required): e.g. "R1"
-            - x (float, required): absolute X position in mils
-            - y (float, required): absolute Y position in mils
+            - x (float, required): X position in mils from the board origin
+            - y (float, required): Y position in mils from the board origin
             - rotation (float, optional): degrees (0-360) in the convention
               above. Omit (or pass -1) to keep Altium's current rotation.
             - side (str, optional): "top" or "bottom"; the footprint is

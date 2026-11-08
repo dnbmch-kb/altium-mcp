@@ -133,11 +133,11 @@
     },
     {
       "name": "set_component_position",
-      "description": "Set a component's absolute position (X, Y, rotation) in the PCB layout"
+      "description": "Set a component's position (X, Y in mils from the board origin, rotation) in the PCB layout"
     },
     {
       "name": "place_components",
-      "description": "Place any number of components at absolute positions (x, y, rotation, side) in one undo step"
+      "description": "Place any number of components at positions (x, y in mils from the board origin, rotation, side) in one undo step"
     },
     {
       "name": "check_placement",
