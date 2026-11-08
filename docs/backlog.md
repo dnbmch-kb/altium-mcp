@@ -55,6 +55,30 @@ worked around by a script in that session. A row fixed on a branch stays until i
   walks every wire of the sheet on each pass of its dead-end sweep and tests each touched wire's vertices with
   `EdLiveAt`; which step costs the time is not measured. Fix: the per-op cost found and cut. Done: a clear of that
   sheet, timed from its `progress.log`, names the cost removed and the per-op time left.
+- **`edit_schematic`'s `delete` finds top-level objects only** (`EdFindUid`, `server/AltiumScript/schematic_edit.pas`),
+  so a sheet symbol's entry (RECORD 16) cannot be deleted; laser-calib MAIN_A's ten DNP parts off three sheets
+  (2026-11-06) took a sandbox script for it (the symbol's eSheetEntry children iterated, `RemoveSchObject`, saved). Fix:
+  `delete` descends into sheet symbols for an entry's id, or a `delete_entry` op. And `delete_component` with
+  `dead_ends` left the stubs that met the part's wires at junctions (12 wires and 1 label on RX_XY and FRONTEND_A, each
+  an open wire end for `sch_check.py`): a dead end whose only other anchor was a junction of the deleted part's wire is
+  a dead end too. Done when the three sheets' deletes leave `sch_check.py` without an open wire end.
+- **`dev/unwedge.py` can report STILL WEDGED while Altium's executor runs** (2026-10-23 16:18: STILL WEDGED, and a
+  trivial script ran 2 s later): `executor_alive` starts its probe through `cmd.exe` (`subprocess.Popen(...,
+  shell=True)`) and waits 45 s for its result file, under the one-script lock both its callers take (`unwedge.py`'s
+  `__main__`, `sandbox_runner.py`'s). Cause unread. Fix (untried): the probe names one that never got the executor apart
+  from one that ran and wrote nothing.
+- **Every X2.EXE line starts through `cmd.exe`, with no no-window flag** (`subprocess.Popen(…, shell=True)`:
+  `server/main.py@12a3ce7:359` `AltiumBridge.stop_scripting`, `:570` `AltiumBridge.run_altium_script`, `:1498`
+  `_run_altium_script`; `dev/sandbox_runner.py` `run` and `restart_altium`; `dev/unwedge.py` `stop_launcher` and
+  `executor_alive`), against two rules tools' `altium/` holds: no run takes the operator's foreground (its
+  `altium_run.start` sends every X2.EXE line through WMI) and no spawn opens a console window (`tools/altium/hazards.md`
+  § No console window). Tools' `altium/test_spawns.py` pins its own call sites and scans no file here. Fix: the same
+  WMI start here, its `^|` escapes dropped since no shell reads the line, and a spawn test over this repo. Done: no
+  `shell=True` left in a launch, the test passing.
+- **`run_altium_script` leaves the tree dirty after every run**: `_run_altium_script` (`server/main.py@12a3ce7:1419`)
+  writes the call's script into the tracked `server/SandboxScript/Sandbox.pas` in place (`:1479`) and runs the tracked
+  `Sandbox.PrjScr` (`:1495-1498`), which Altium saves its own sections into. Fix: each run on a staged copy of the
+  script project, as tools' `altium/altium_run.py` stages a project. Done: `git status` clean after a call.
 ## `build_schematic` attaches the new sheet to whatever project is focused
 
 Making LED_INJECT's sheet while the collector strip's project was focused attached `LED_INJECT.SchDoc` to
