@@ -74,7 +74,18 @@ worked around by a script in that session. A row fixed on a branch stays until i
   `altium_run.start` sends every X2.EXE line through WMI) and no spawn opens a console window (`tools/altium/hazards.md`
   § No console window). Tools' `altium/test_spawns.py` pins its own call sites and scans no file here. Fix: the same
   WMI start here, its `^|` escapes dropped since no shell reads the line, and a spawn test over this repo. Done: no
-  `shell=True` left in a launch, the test passing.
+  `shell=True` left in a launch, the test passing. Tools' `altium/watchdog.py` relaunches Altium through this server's
+  `:570` (tools' `altium/backlog.md`), so its X2 comes up inside the watchdog's caller's tree.
+- **`dev/unwedge.py` is a Stop line, and its fallback takes the operator's foreground** (`dev/unwedge.py@3ecdcff`):
+  `stop_launcher` (`:85`) sends `X2.EXE -REditScript:Stop`, which frees a paused script and wedges one still running
+  (tools' `altium/hazards.md` § The in-memory script text and the paused debugger, § A Stop line's Error box), yet
+  `dev/README.md` § Recovering a wedged executor offers it for any wedge; when its probe fails, `stop_via_keys`
+  (`:99-127`) raises Altium's window with `ShowWindow` and `SetForegroundWindow` and types Ctrl+F3 by `SendKeys`,
+  against the rule that no agent run takes the operator's foreground (`#Notes/guides/pcb_workbench.md` § Working in
+  the shared Altium); its starts go through `cmd.exe` (`:85`, `:139`, the row above). Fix: `stop_via_keys` goes;
+  `unwedge.py` sends its Stop line only while a script Error box stands (a paused script) and otherwise says a script
+  still running needs Altium restarted; the README section says the same. Done: no `SetForegroundWindow` or `SendKeys`
+  left in `dev/`, and `unwedge.py` with no script Error box up sends nothing.
 - **`run_altium_script` leaves the tree dirty after every run**: `_run_altium_script` (`server/main.py@12a3ce7:1419`)
   writes the call's script into the tracked `server/SandboxScript/Sandbox.pas` in place (`:1479`) and runs the tracked
   `Sandbox.PrjScr` (`:1495-1498`), which Altium saves its own sections into. Fix: each run on a staged copy of the
