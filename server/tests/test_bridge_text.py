@@ -15,14 +15,13 @@ import os
 import sys
 import tempfile
 import unittest
-from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 import main  # noqa: E402
-import script_lock  # noqa: E402
 from altium_files import ansi_script  # noqa: E402
+from tests.offline import offline  # noqa: E402
 
 TEXT = "Fühler 25 °C ß"
 CP1252 = ctypes.windll.kernel32.GetACP() == 1252
@@ -41,22 +40,16 @@ class BridgeTextTest(unittest.TestCase):
         self.dir = Path(self.tmp.name)
         self.saved = {k: getattr(main, k) for k in ("EXCHANGE_DIR", "SANDBOX_PAS")}
         self.saved_run = main.altium_bridge.run_altium_script
-        self.saved_lock = (script_lock.LOCK, script_lock.HOLD)
         main.EXCHANGE_DIR = self.dir                 # the mailbox in a scratch folder
-        # and the one-script lock, its hold and queue: the live ones belong to the running Altium's jobs
-        script_lock.LOCK, script_lock.HOLD = self.dir / "altium_script.lock", self.dir / "altium_run.hold"
-        # and the tools' resident bridge out of reach: a call meeting the live one would close its form, start it again
-        isolate = mock.patch.multiple(main.resident, top_windows=lambda: [], DIR=self.dir / "resident",
-                                      BEAT=self.dir / "resident" / "heartbeat.txt",
-                                      WANTED=self.dir / "resident" / "wanted")
-        isolate.start()
-        self.addCleanup(isolate.stop)
+        # and the one-script lock and the resident bridge: the live ones belong to the running Altium's jobs
+        for guard in offline(self.dir):
+            guard.start()
+            self.addCleanup(guard.stop)
 
     def tearDown(self):
         for k, v in self.saved.items():
             setattr(main, k, v)
         main.altium_bridge.run_altium_script = self.saved_run
-        script_lock.LOCK, script_lock.HOLD = self.saved_lock
         self.tmp.cleanup()
 
     def test_request_json_carries_the_text_into_every_line_parser(self):

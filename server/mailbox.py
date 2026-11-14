@@ -1,10 +1,10 @@
 """The bridge's mailbox: a server hands Altium one request and takes back the answer to that request only.
 
 Every altium-mcp server on the machine (one per client session) drives the one running Altium through the folder
-below; the one-script lock (script_lock.py) lets one of them in at a time. The layout:
+below; the one-script lock (c:/Projects/tools/altium/altium_lock.py) lets one of them in at a time. The layout:
 
     C:/Users/Public/altium_mcp/
-        altium_script.lock      the lock: who runs a script now (script_lock.py, tools/altium/altium_lock.py)
+        altium_script.lock      the lock: who runs a script now (altium_lock.py)
         queue/<id>.req          a request waiting for the bridge; the bridge takes it by renaming it into its folder
         mail/<id>/              everything one request exchanges:
             request.json            the command and its parameters, with request_id and sender_pid

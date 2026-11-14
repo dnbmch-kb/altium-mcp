@@ -68,8 +68,7 @@ worked around by a script in that session. A row fixed on a branch stays until i
   `__main__`, `sandbox_runner.py`'s). Cause unread. Fix (untried): the probe names one that never got the executor apart
   from one that ran and wrote nothing.
 - **Every X2.EXE line starts through `cmd.exe`, with no no-window flag** (`subprocess.Popen(…, shell=True)`:
-  `server/main.py@12a3ce7:359` `AltiumBridge.stop_scripting`, `:570` `AltiumBridge.run_altium_script`, `:1498`
-  `_run_altium_script`; `dev/sandbox_runner.py` `run` and `restart_altium`; `dev/unwedge.py` `stop_launcher` and
+  `server/main.py@12a3ce7:570` `AltiumBridge.run_altium_script`, `:1498` `_run_altium_script`; `dev/sandbox_runner.py` `run` and `restart_altium`; `dev/unwedge.py` `stop_launcher` and
   `executor_alive`), against two rules tools' `altium/` holds: no run takes the operator's foreground (its
   `altium_run.start` sends every X2.EXE line through WMI) and no spawn opens a console window (`tools/altium/hazards.md`
   § No console window). Tools' `altium/test_spawns.py` pins its own call sites and scans no file here. Fix: the same

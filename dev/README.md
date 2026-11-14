@@ -16,10 +16,10 @@ Tools for developing new Altium API functionality. Not part of the MCP server.
 
 Altium runs one script at a time, and several tools drive the same running instance: this server, these dev
 tools, and outside this repo `c:/Projects/tools/altium/altium_run.py` (altium-lib-factory's board templates and
-library batch, laser-calib's footprint library). Each holds the lock in [`../server/script_lock.py`](../server/script_lock.py)
-(the same protocol as `c:/Projects/tools/altium/altium_lock.py`) from its RunScript until the script's output
-arrives; a busy Altium is reported with the holder's name, pid and start. The dialog closers here touch only
-windows owned by `X2.EXE` (`capture_window.owner_exe`), never another application's.
+library batch, laser-calib's footprint library). Each holds the one lock, `c:/Projects/tools/altium/altium_lock.py`
+(imported by its path), from its RunScript until the script's output arrives; a busy Altium is reported with the
+holder's name, pid and start, and one Windows reports not responding is refused before anything is sent. The
+dialog closers here touch only windows owned by `X2.EXE` (`capture_window.owner_exe`), never another application's.
 
 ## The mailbox
 

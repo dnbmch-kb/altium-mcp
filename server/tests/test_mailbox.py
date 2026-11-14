@@ -22,8 +22,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 
 import mailbox  # noqa: E402
 import main  # noqa: E402
-import script_lock  # noqa: E402
+from main import altium_lock  # noqa: E402  the tools' one-script lock, by the path main.py adds
 from altium_files import read_altium_text  # noqa: E402
+from tests.offline import offline  # noqa: E402
 from PIL import Image  # noqa: E402
 
 
@@ -108,12 +109,9 @@ class Fixture(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.lock = self.root / "altium_script.lock"
-        # the tools' resident bridge out of reach: a call meeting the live one would close its form and start it again
-        isolate = mock.patch.multiple(main.resident, top_windows=lambda: [], DIR=self.root / "resident",
-                                      BEAT=self.root / "resident" / "heartbeat.txt",
-                                      WANTED=self.root / "resident" / "wanted")
-        isolate.start()
-        self.addCleanup(isolate.stop)
+        for guard in offline(self.root):
+            guard.start()
+            self.addCleanup(guard.stop)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -287,21 +285,22 @@ class ExecuteCommandTest(Fixture):
 
     def setUp(self):
         super().setUp()
-        self.saved = (main.EXCHANGE_DIR, script_lock.LOCK, script_lock.HOLD, main.altium_bridge.run_altium_script)
+        self.saved = (main.EXCHANGE_DIR, main.altium_bridge.run_altium_script)
         main.EXCHANGE_DIR = self.root
-        script_lock.LOCK, script_lock.HOLD = self.lock, self.root / "altium_run.hold"
         self.env = dict(os.environ)
-        os.environ.pop(script_lock.HOLD_ENV, None)
-        self.owners = []
+        os.environ.pop(altium_lock.HOLD_ENV, None)
+        os.environ.pop(altium_lock.QUEUE_ENV, None)
+        self.owners, self.holders = [], []
 
         async def altium():                    # RunScript: Altium serves the queue a moment later
             self.owners.append(json.loads(self.lock.read_text(encoding="utf-8"))["owner"])
+            self.holders.append(sorted(p.name for p in (self.root / "holder").glob("*.pid")))
             threading.Timer(0.05, FakeBridge(self.root, self.lock, steps=2, step_seconds=0.02).run).start()
             return True
         main.altium_bridge.run_altium_script = altium
 
     def tearDown(self):
-        main.EXCHANGE_DIR, script_lock.LOCK, script_lock.HOLD, main.altium_bridge.run_altium_script = self.saved
+        main.EXCHANGE_DIR, main.altium_bridge.run_altium_script = self.saved
         os.environ.clear()
         os.environ.update(self.env)
         super().tearDown()
@@ -311,21 +310,57 @@ class ExecuteCommandTest(Fixture):
         # holder, the dev/call_tool.py the run starts carries its token and takes the lock; a dead run's hold goes
         child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
         try:
-            script_lock.HOLD.write_text(json.dumps(dict(pid=child.pid, owner="board_build CTRL", since=0, token="t")),
+            altium_lock.HOLD.write_text(json.dumps(dict(pid=child.pid, owner="board_build CTRL", since=0, token="t")),
                                         encoding="utf-8")
-            holder = script_lock.try_take("altium-mcp get_all_nets (mailbox)")
-            self.assertIn("a run's hold: board_build CTRL", script_lock.describe(holder))
+            holder = altium_lock.try_take("altium-mcp get_all_nets (mailbox)")
+            self.assertIn("a run's hold: board_build CTRL", str(altium_lock.Busy(holder)))
             self.assertFalse(self.lock.exists())
-            os.environ[script_lock.HOLD_ENV] = "t"
-            self.assertIsNone(script_lock.try_take("altium-mcp edit_schematic (dev)"))
-            script_lock.release()
-            del os.environ[script_lock.HOLD_ENV]
+            os.environ[altium_lock.HOLD_ENV] = "t"
+            self.assertIsNone(altium_lock.try_take("altium-mcp edit_schematic (dev)"))
+            altium_lock.release()
+            del os.environ[altium_lock.HOLD_ENV]
         finally:
             child.kill()
             child.wait()
-        self.assertIsNone(script_lock.try_take("altium-mcp get_all_nets (mailbox)"))
-        script_lock.release()
-        self.assertFalse(script_lock.HOLD.exists())
+        self.assertIsNone(altium_lock.try_take("altium-mcp get_all_nets (mailbox)"))
+        altium_lock.release()
+        self.assertFalse(altium_lock.HOLD.exists())
+
+    def test_altium_not_responding_refuses_the_call_before_anything_is_sent(self):
+        # a script sent into a frozen Altium queues behind whatever froze it (tools altium_lock.NotResponding)
+        with mock.patch.object(altium_lock, "hung_windows", return_value=[(4242, "X.PrjPcb - Altium Designer")]):
+            r = asyncio.run(main.altium_bridge.execute_command("get_all_nets", {}, stall=2))
+        self.assertFalse(r["success"])
+        self.assertIn('Altium is not responding: X2.EXE pid 4242 window "X.PrjPcb - Altium Designer"', r["error"])
+        self.assertEqual((self.owners, self.lock.exists()), ([], False))
+        self.assertFalse((self.root / "queue").exists())                # no request posted
+        self.assertEqual(altium_lock.queued(), [])
+
+    def waits(self, then, wait=60):
+        """wait_for_lock against a holder that keeps the lock, then `then` at the second look (an exception
+        raised, else the holder again): its result and the waiters' lines as each look found them."""
+        holder, seen = dict(pid=os.getpid() + 1, owner="board_job LED240P", since=time.time()), []
+
+        def try_take(owner):
+            seen.append([w["what"] for w in map(altium_lock.waiter, altium_lock.queued()) if w])
+            if len(seen) > 1 and isinstance(then, Exception):
+                raise then
+            return holder
+        with mock.patch.object(altium_lock, "try_take", side_effect=try_take):
+            return asyncio.run(main.wait_for_lock("altium-mcp get_all_nets (mailbox)", wait=wait)), seen
+
+    def test_a_wait_altium_ends_not_responding_leaves_the_queue(self):
+        # this server outlives its call: a line it left would stand first and keep the slot from every other taker
+        refused, seen = self.waits(altium_lock.NotResponding([(4242, "X.PrjPcb - Altium Designer")]))
+        self.assertIn("Altium is not responding", refused)
+        self.assertEqual(seen, [[], ["altium-mcp get_all_nets (mailbox)"]])     # its line stood while it waited
+        self.assertEqual(altium_lock.queued(), [])
+
+    def test_a_wait_past_its_time_names_the_holder_and_leaves_the_queue(self):
+        refused, seen = self.waits(None, wait=0.6)
+        self.assertIn("Altium is running another script: board_job LED240P", refused)
+        self.assertEqual((seen[0], seen[-1]), ([], ["altium-mcp get_all_nets (mailbox)"]))
+        self.assertEqual(altium_lock.queued(), [])
 
     def test_a_call_holds_the_lock_as_a_mailbox_caller_and_gets_its_own_answer(self):
         r = asyncio.run(main.altium_bridge.execute_command("get_all_nets", {"x": 1},
@@ -333,6 +368,9 @@ class ExecuteCommandTest(Fixture):
         self.assertTrue(r["success"], r)
         self.assertEqual(r["result"]["echo"]["x"], 1)
         self.assertEqual(self.owners, ["altium-mcp get_all_nets (mailbox)"])
+        # the bridge reads the holder from the folder beside the lock: this server named while it holds it, none after
+        self.assertEqual(self.holders, [[f"{os.getpid()}.pid"]])
+        self.assertEqual(list((self.root / "holder").glob("*.pid")), [])
         self.assertEqual(Path(r["mail"]).name, r["request_id"])
         self.assertEqual(read_altium_text(Path(r["mail"]) / "edit_spec.txt"), "S\n")
         self.assertFalse(self.lock.exists())

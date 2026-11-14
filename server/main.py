@@ -30,11 +30,14 @@ import re
 from altium_files import altium_env, ansi_script, read_altium_text, write_altium_text
 from outjob_parser import outjob_project, output_folder, parse_outjob, produced, snapshot
 import mailbox
-import resident_bridge as resident
 import schematic_edit
 import screenshot
-import script_lock
 import sheet_plan
+
+# the tools' one-script lock and resident bridge, by full path; appended, so a tools worktree on PYTHONPATH comes first
+sys.path.append("C:/Projects/tools/altium")
+import altium_lock  # noqa: E402
+import resident  # noqa: E402
 
 # Configure logging
 logging.basicConfig(
@@ -122,6 +125,18 @@ def stage_bridge(project: Path, root: Path = BRIDGE_STAGE_DIR) -> Path:
             shutil.copy2(project.parent / relative, staging / relative)
         staging.rename(target)
     return target / project.name
+
+
+def held_by_resident(project: Path) -> bool:
+    """Does the loaded resident bridge hold every unit of this server's script project as it is on disk: its sha1 in
+    units.txt of the folder the bridge's heartbeat names?"""
+    project = Path(project)
+    cfg = configparser.ConfigParser(interpolation=None, strict=False)
+    cfg.read_string(project.read_bytes().removeprefix(codecs.BOM_UTF8).decode("latin-1"))
+    names = [cfg[s]["DocumentPath"] for s in cfg.sections() if re.fullmatch(r"Document\d+", s)]
+    b = resident.beat()
+    loaded = resident.loaded_units(b["folder"]) if b else {}
+    return b is not None and all(loaded.get(n) == resident.sha((project.parent / n).read_bytes()) for n in names)
 
 # Initialize FastMCP server
 mcp = FastMCP("AltiumMCP", description="Altium integration through the Model Context Protocol")
@@ -335,28 +350,24 @@ class AltiumBridge:
         the request's folder beside it. Waits while the bridge reports progress, gives up after `stall` seconds
         without a record. The answer carries "mail", the request's folder, where the command's output files are."""
         async with self._command_lock:
-            holder = await take_script_lock(f"altium-mcp {command} (mailbox)")
-            if holder is not None:
-                return {"success": False, "error": script_lock.describe(holder)}
+            refused = await wait_for_lock(f"altium-mcp {command} (mailbox)")
+            if refused:
+                return {"success": False, "error": refused}
             try:
                 return await self._execute_command_locked(command, params, files or {},
                                                           stall or STALL_BY_COMMAND.get(command, STALL_SECONDS), ctx)
             finally:
-                script_lock.release()
+                altium_lock.release()
 
     def through_resident(self) -> bool:
         """Does the tools' resident bridge serve this call (resident.py): its form stands, it holds this server's
         script units as they are on disk, and it answers a no-op within resident.ANSWER seconds."""
         try:
-            return (resident.window() is not None and resident.holds(resident.units(self.config.script_path))
-                    and resident.answers(mailbox, EXCHANGE_DIR))
+            return (resident.window() is not None and held_by_resident(self.config.script_path)
+                    and resident.answers())
         except OSError as e:                            # its folder or our units unreadable: today's way
             logger.warning(f"resident bridge not used: {e}")
             return False
-
-    def stop_scripting(self):
-        """EditScript:Stop into the running Altium: a script paused in the debugger stops. -> its launcher."""
-        return subprocess.Popen(f'"{self.config.altium_exe_path}" -REditScript:Stop', shell=True, env=altium_env())
 
     async def _execute_command_locked(self, command: str, params: Dict[str, Any], files: Dict[str, str],
                                       stall: float, ctx) -> Dict[str, Any]:
@@ -377,15 +388,15 @@ class AltiumBridge:
         if through:
             mail.params = dict(params, benign=resident.benign())
         else:
-            resident.yield_(logger.info, self.stop_scripting)
+            resident.yield_(logger.info)
         try:
             return await self._call(mail, command, stall, ctx, through)
         finally:
             if through and mail.taken() and mail.answer() is None:     # it raised: its script ended under a box
-                resident.yield_(logger.info, self.stop_scripting, dead_already=True)
+                resident.yield_(logger.info, dead=True)
                 through = False
             if not through:
-                await asyncio.to_thread(resident.restart, logger.info, altium_env())
+                await asyncio.to_thread(restart_resident, logger.info)
 
     async def _call(self, mail, command: str, stall: float, ctx, through: bool) -> Dict[str, Any]:
         """One request: posted, then Altium_API>Run launched unless the resident bridge serves it, its answer waited
@@ -651,16 +662,31 @@ def grab_window(hwnd) -> Image.Image:
         user32.SetThreadDpiAwarenessContext(ctypes.c_void_p(previous_dpi))
 
 
-async def take_script_lock(owner: str, wait: float = 60):
-    """Wait up to `wait` seconds for Altium's one-script lock (script_lock.py): None when taken, else the holder."""
+async def wait_for_lock(owner: str, wait: float = 60):
+    """Wait up to `wait` seconds for Altium's one-script lock (tools altium/altium_lock.py), in its queue meanwhile:
+    None when taken, else why not - the holder that kept it, or Altium not responding, nothing sent into it."""
     deadline = time.monotonic() + wait
-    while (holder := script_lock.try_take(owner)) is not None:
-        if time.monotonic() >= deadline:
-            script_lock.leave()                     # our wait given up: our line out of the queue
-            return holder
-        script_lock.waiting(owner)                  # our line in the queue, once; it goes when our turn's lock is taken
-        await asyncio.sleep(0.5)
+    try:
+        while (holder := altium_lock.try_take(owner)) is not None:
+            if time.monotonic() >= deadline:
+                altium_lock.leave()                 # our wait given up: our line out of the queue
+                return str(altium_lock.Busy(holder))
+            altium_lock.waiting(owner)              # our line in the queue, once; it goes when our turn's lock is taken
+            await asyncio.sleep(0.5)
+    except altium_lock.NotResponding as e:
+        altium_lock.leave()                         # this process outlives the call: its line would keep the slot
+        return str(e)
     return None
+
+
+def restart_resident(report):
+    """The tools' resident bridge started again under this process's lock while it is wanted; the call's own result
+    stands when it does not start."""
+    if resident.wanted():
+        try:
+            resident.start(report, held=True)
+        except (OSError, RuntimeError) as e:
+            report(f"resident bridge not started: {e}")
 
 
 # Create a global bridge instance
@@ -1554,18 +1580,18 @@ async def _run_altium_script(ctx: Context, script: str, timeout_seconds: int = 1
 
 
 async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 120) -> str:
-    holder = await take_script_lock("altium-mcp run_altium_script")
-    if holder is not None:
-        return json.dumps({"success": False, "error": script_lock.describe(holder)})
+    refused = await wait_for_lock("altium-mcp run_altium_script")
+    if refused:
+        return json.dumps({"success": False, "error": refused})
     try:
         # the sandbox is a RunScript of its own: the resident bridge's form closed first, the bridge back after
-        resident.yield_(logger.info, altium_bridge.stop_scripting)
+        resident.yield_(logger.info)
         try:
             return await _run_altium_script(ctx, script, timeout_seconds)
         finally:
-            await asyncio.to_thread(resident.restart, logger.info, altium_env())
+            await asyncio.to_thread(restart_resident, logger.info)
     finally:
-        script_lock.release()
+        altium_lock.release()
 
 
 run_altium_script.__doc__ = _run_altium_script.__doc__  # the tool's description

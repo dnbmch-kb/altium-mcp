@@ -54,12 +54,13 @@ def _config_path():
 config = json.load(open(_config_path()))
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from unwedge import stop_launcher, unwedge  # noqa: E402
+from unwedge import unwedge  # noqa: E402
 from capture_window import owner_exe  # noqa: E402
 sys.path.insert(0, str(REPO / "server"))
-import resident_bridge as resident  # noqa: E402  the tools' resident bridge, which refuses every other script while loaded
-import script_lock  # noqa: E402  one script at a time across every tool driving Altium
 from altium_files import altium_env, ansi_script, read_altium_text  # noqa: E402
+sys.path.append("C:/Projects/tools/altium")
+import altium_lock  # noqa: E402  one script at a time across every tool driving Altium
+import resident  # noqa: E402  the tools' resident bridge, which refuses every other script while loaded
 
 
 def _title(hwnd):
@@ -324,16 +325,16 @@ if __name__ == "__main__":
     body = sys.stdin.read() if args[0] == "-" else Path(args[0]).read_text(encoding="utf-8")
     timeout = int(args[1]) if len(args) > 1 else 120
 
-    if (holder := script_lock.take("altium-mcp dev/sandbox_runner.py", wait=10)) is not None:
-        print(script_lock.describe(holder))
-        sys.exit(1)
     try:
-        # the sandbox is a RunScript: the tools' resident bridge out of its way first, back after (server/resident.py)
-        resident.yield_(print, stop_launcher)
-        try:
-            ok = sandbox(body, timeout, flags)
-        finally:
-            resident.restart(print, altium_env())
-    finally:
-        script_lock.release()
+        with altium_lock.held("altium-mcp dev/sandbox_runner.py", wait=10):
+            # the sandbox is a RunScript: the tools' resident bridge out of its way first, back after
+            resident.yield_(print)
+            try:
+                ok = sandbox(body, timeout, flags)
+            finally:
+                if resident.wanted():
+                    resident.start(print, held=True)
+    except (altium_lock.Busy, altium_lock.NotResponding) as e:
+        print(e)
+        sys.exit(1)
     sys.exit(0 if ok else 1)
