@@ -16,6 +16,13 @@ worked around by a script in that session. A row fixed on a branch stays until i
   same: three sheets it saved under a focused scratch PrjPcb (2026-10-30) answered `detached_from: ""` and stayed attached
   to it in memory, so `closeproject.py` named them `attached` until a script took each out with
   `DM_RemoveSourceDocument(<full path>)`; its detach (`schematic_utils.pas`, after `DM_CreateNewDocument`) did not run.
+- **`rename_label` moves a label onto a neighbouring part's body and does not refuse** (dss-r0-aiv CTRL, 2026-11-14,
+  on a parked copy): J301's pin 2 carried a 700 mil stub with the label LB1_A at its free end; renamed LB1_P, the
+  stub was drawn anew as long as the text and the label moved with it under F301's body (`sch_check.py`: `overlap
+  net label LB1_P x F301 body at (11372, 13100)`), where the op's contract is a refusal with the old text kept.
+  The batch drew the label new where the old one stood through schgen's draw script instead (`DELETE`, `LABEL`).
+  Fix: the redrawn stub's label box tested against part bodies as a placement's connections are, or a `keep_stub`
+  flag that renames the text alone. Done: that rename refused or its stub kept, `sch_check.py` with no overlap.
 - **`sheet_plan.py`'s `stub_for` sizes a label's stub at 60 mil per character plus 200** (`sheet_plan.stub_for`), while
   `rename_label` sizes the redrawn stub from Altium's own measure of the text (the house rule: a stub as long as its
   text), so the planner and a rename disagree. Fix: one measure - the planner takes the stroke font's advance
