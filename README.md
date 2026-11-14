@@ -34,6 +34,11 @@ You shouldn't need to restart Claude and you should now see altium-mcp in the to
 
 ![altium-mcp in the tools menu](assets/extension.jpg)
 
+In this house it is registered once at user scope, so every Claude Code session has it:
+`claude mcp add -s user altium -- "%USERPROFILE%\.altium-mcp\venv\Scripts\python.exe" c:\Projects\altium-mcp\server\main.py`.
+A session started before that, or a subagent without MCP tools, calls the same tools from a shell through
+`dev/call_tool.py` ([dev/README.md](dev/README.md)). `claude mcp list` in a repo shows what it has.
+
 ## Creating a new .dxt (For Developers)
 
 ### Bootstrap Venv (Recommended)
