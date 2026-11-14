@@ -182,19 +182,19 @@ def unwedge(verbose=True, verify=True):
 
 
 if __name__ == "__main__":
-    sys.path.insert(0, str(REPO / "server"))
-    import resident_bridge as resident
-    import script_lock
-    if (holder := script_lock.take("altium-mcp dev/unwedge.py", wait=10)) is not None:
-        print(script_lock.describe(holder))
-        sys.exit(1)
+    sys.path.append("C:/Projects/tools/altium")
+    import altium_lock
+    import resident
     try:
-        # its probe is a RunScript: the tools' resident bridge out of its way first, back after (server/resident.py)
-        resident.yield_(print, stop_launcher)
-        try:
-            ok = unwedge(verify="--no-verify" not in sys.argv)
-        finally:
-            resident.restart(print, ALTIUM_ENV)
-    finally:
-        script_lock.release()
+        with altium_lock.held("altium-mcp dev/unwedge.py", wait=10):
+            # its probe is a RunScript: the tools' resident bridge out of its way first, back after
+            resident.yield_(print)
+            try:
+                ok = unwedge(verify="--no-verify" not in sys.argv)
+            finally:
+                if resident.wanted():
+                    resident.start(print, held=True)
+    except (altium_lock.Busy, altium_lock.NotResponding) as e:
+        print(e)
+        sys.exit(1)
     sys.exit(0 if ok else 1)
