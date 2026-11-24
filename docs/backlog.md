@@ -102,3 +102,8 @@ Making LED_INJECT's sheet while the collector strip's project was focused attach
 `COLLECTOR_STRIP.PrjPcb` in memory (2026-10-31; ugv-pcb's LED_INJECT run), so `closeproject.py` refused the strip until
 a one-off `DM_RemoveSourceDocument` script took it off. Fix: `build_schematic` takes the target project by path (or
 refuses while the focused project is another's) and reads back which project holds the new sheet.
+
+## Docs tidy
+
+- **`PLACEMENT_TOOL_REVIEW.md` sits at the repo root with no inbound link.** Fix: move it into `docs/` or delete it.
+- **`README.md` (286 lines) still describes a live server** under a one-line retired note. Fix: rewrite it to the retired state.
