@@ -1,3 +1,5 @@
+> **Retired:** this MCP server is retired; the Altium work runs through `tools/altium` — see [one_way_in.md](../tools/docs/plans/one_way_in.md).
+
 # Altium MCP Server
 
 TLDR: Use Claude to control or ask questions about your Altium project.
